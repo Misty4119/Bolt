@@ -35,6 +35,18 @@ final class SimpleProtectionCacheRedisTest {
         assertEquals("public", cache.loadBlockProtection(location).join().getType());
     }
 
+    @Test
+    void collectionReadsReconcileProtectionsCreatedByAnotherServer() {
+        final MemoryStore backing = new MemoryStore();
+        final SimpleProtectionCache cache = new SimpleProtectionCache(backing, null, "network", "server-b");
+        final BlockProtection protection = protection(UUID.randomUUID(), "private");
+
+        backing.saveBlockProtection(protection);
+
+        assertEquals(1, cache.loadBlockProtections().join().size());
+        assertEquals(protection.getId(), cache.loadBlockProtection(new BlockLocation("world", 4, 65, 9)).join().getId());
+    }
+
     private static BlockProtection protection(final UUID id, final String type) {
         return new BlockProtection(id, UUID.randomUUID(), type, 1, 1, new HashMap<>(), "world", 4, 65, 9, "CHEST");
     }

@@ -474,11 +474,19 @@ public final class BlockListener extends InteractionListener implements Listener
     @EventHandler
     public void onBlockIgnite(final BlockIgniteEvent e) {
         final Protection protection = plugin.findProtection(e.getBlock());
-        if (protection == null) {
+        if (protection != null) {
+            final Player player = e.getPlayer();
+            if (player == null || !plugin.canAccess(protection, player, Permission.INTERACT)) {
+                e.setCancelled(true);
+                return;
+            }
+        }
+        final BlockIgniteEvent.IgniteCause cause = e.getCause();
+        if (!BlockIgniteEvent.IgniteCause.FLINT_AND_STEEL.equals(cause)
+                && !BlockIgniteEvent.IgniteCause.FIREBALL.equals(cause)) {
             return;
         }
-        final Player player = e.getPlayer();
-        if (player == null || !plugin.canAccess(protection, player, Permission.INTERACT)) {
+        if (hasProtectedNetherPortalFrame(e.getBlock())) {
             e.setCancelled(true);
         }
     }
@@ -672,6 +680,31 @@ public final class BlockListener extends InteractionListener implements Listener
         if (!plugin.canAccess(protection, player, Permission.INTERACT)) {
             e.setCancelled(true);
         }
+    }
+
+    private boolean hasProtectedNetherPortalFrame(final Block ignitionBlock) {
+        final int radius = 24;
+        for (int offsetX = -radius; offsetX <= radius; offsetX++) {
+            for (int offsetY = -radius; offsetY <= radius; offsetY++) {
+                final Block xPlane = ignitionBlock.getWorld().getBlockAt(
+                        ignitionBlock.getX() + offsetX,
+                        ignitionBlock.getY() + offsetY,
+                        ignitionBlock.getZ()
+                );
+                if (xPlane.getType() == Material.OBSIDIAN && plugin.isProtected(xPlane)) {
+                    return true;
+                }
+                final Block zPlane = ignitionBlock.getWorld().getBlockAt(
+                        ignitionBlock.getX(),
+                        ignitionBlock.getY() + offsetY,
+                        ignitionBlock.getZ() + offsetX
+                );
+                if (zPlane.getType() == Material.OBSIDIAN && plugin.isProtected(zPlane)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     @EventHandler
