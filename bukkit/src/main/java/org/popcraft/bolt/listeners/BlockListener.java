@@ -70,6 +70,7 @@ import org.popcraft.bolt.util.Permission;
 import org.popcraft.bolt.util.Profiles;
 import org.popcraft.bolt.util.ProtectableConfig;
 import org.popcraft.bolt.util.Protections;
+import org.popcraft.bolt.util.PortalProtectionPolicy;
 import org.popcraft.bolt.util.SchedulerUtil;
 
 import java.util.List;
@@ -665,10 +666,8 @@ public final class BlockListener extends InteractionListener implements Listener
 
     @EventHandler
     public void onPortalCreate(final PortalCreateEvent e) {
-        for (final BlockState newBlock : e.getBlocks()) {
-            if (plugin.isProtected(newBlock.getBlock())) {
-                e.setCancelled(true);
-            }
+        if (PortalProtectionPolicy.shouldCancel(e.getBlocks(), blockState -> plugin.isProtected(blockState.getBlock()))) {
+            e.setCancelled(true);
         }
     }
 }
