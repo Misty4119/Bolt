@@ -5,6 +5,8 @@ public final class Permission {
     public static final String OPEN = "open";
     public static final String DEPOSIT = "deposit";
     public static final String WITHDRAW = "withdraw";
+    public static final String HOPPER_INSERT = "hopper_insert";
+    public static final String HOPPER_EXTRACT = "hopper_extract";
     public static final String MODIFY = "modify";
     public static final String MOUNT = "mount";
     public static final String EDIT = "edit";

@@ -9,14 +9,20 @@ public sealed abstract class Protection permits BlockProtection, EntityProtectio
     protected String type;
     protected long created;
     protected long accessed;
+    protected long version;
     protected Map<String, String> access;
 
     protected Protection(UUID id, UUID owner, String type, long created, long accessed, Map<String, String> access) {
+        this(id, owner, type, created, accessed, 0, access);
+    }
+
+    protected Protection(UUID id, UUID owner, String type, long created, long accessed, long version, Map<String, String> access) {
         this.id = id;
         this.owner = owner;
         this.type = type;
         this.created = created;
         this.accessed = accessed;
+        this.version = version;
         this.access = access;
     }
 
@@ -56,6 +62,17 @@ public sealed abstract class Protection permits BlockProtection, EntityProtectio
         this.accessed = accessed;
     }
 
+    public long getVersion() {
+        return version;
+    }
+
+    public void setVersion(long version) {
+        if (version < 0) {
+            throw new IllegalArgumentException("version must not be negative");
+        }
+        this.version = version;
+    }
+
     public Map<String, String> getAccess() {
         return access;
     }
@@ -72,6 +89,7 @@ public sealed abstract class Protection permits BlockProtection, EntityProtectio
                 ", type='" + type + '\'' +
                 ", created=" + created +
                 ", accessed=" + accessed +
+                ", version=" + version +
                 ", access=" + access +
                 '}';
     }
