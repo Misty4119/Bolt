@@ -74,6 +74,7 @@ import org.popcraft.bolt.util.PortalProtectionPolicy;
 import org.popcraft.bolt.util.SchedulerUtil;
 
 import java.util.List;
+import java.util.HashSet;
 import java.util.Set;
 
 import static org.popcraft.bolt.util.BoltComponents.translateRaw;
@@ -666,8 +667,47 @@ public final class BlockListener extends InteractionListener implements Listener
 
     @EventHandler
     public void onPortalCreate(final PortalCreateEvent e) {
-        if (PortalProtectionPolicy.shouldCancel(e.getBlocks(), blockState -> plugin.isProtected(blockState.getBlock()))) {
+        final Set<Block> candidates = new HashSet<>();
+        e.getBlocks().forEach(blockState -> candidates.add(blockState.getBlock()));
+        candidates.addAll(findNetherPortalFrameCandidates(e.getBlocks()));
+        if (PortalProtectionPolicy.shouldCancel(candidates, plugin::isProtected)) {
             e.setCancelled(true);
         }
+    }
+
+    private Set<Block> findNetherPortalFrameCandidates(final List<BlockState> portalBlocks) {
+        if (portalBlocks.stream().noneMatch(state -> Material.NETHER_PORTAL.equals(state.getType()))) {
+            return Set.of();
+        }
+        final Set<Block> candidates = new HashSet<>();
+        final int minX = portalBlocks.stream().mapToInt(state -> state.getBlock().getX()).min().orElseThrow();
+        final int maxX = portalBlocks.stream().mapToInt(state -> state.getBlock().getX()).max().orElseThrow();
+        final int minY = portalBlocks.stream().mapToInt(state -> state.getBlock().getY()).min().orElseThrow();
+        final int maxY = portalBlocks.stream().mapToInt(state -> state.getBlock().getY()).max().orElseThrow();
+        final Set<Integer> xValues = portalBlocks.stream().map(state -> state.getBlock().getX()).collect(java.util.stream.Collectors.toSet());
+        final Set<Integer> zValues = portalBlocks.stream().map(state -> state.getBlock().getZ()).collect(java.util.stream.Collectors.toSet());
+        if (zValues.size() == 1) {
+            final Block sample = portalBlocks.getFirst().getBlock();
+            for (int x = minX - 1; x <= maxX + 1; x++) {
+                for (int y = minY - 1; y <= maxY + 1; y++) {
+                    if (x == minX - 1 || x == maxX + 1 || y == minY - 1 || y == maxY + 1) {
+                        candidates.add(sample.getWorld().getBlockAt(x, y, sample.getZ()));
+                    }
+                }
+            }
+        } else if (xValues.size() == 1) {
+            final Block sample = portalBlocks.getFirst().getBlock();
+            for (int z = portalBlocks.stream().mapToInt(state -> state.getBlock().getZ()).min().orElseThrow() - 1;
+                 z <= portalBlocks.stream().mapToInt(state -> state.getBlock().getZ()).max().orElseThrow() + 1; z++) {
+                for (int y = minY - 1; y <= maxY + 1; y++) {
+                    if (z == zValues.stream().mapToInt(Integer::intValue).min().orElseThrow() - 1
+                            || z == zValues.stream().mapToInt(Integer::intValue).max().orElseThrow() + 1
+                            || y == minY - 1 || y == maxY + 1) {
+                        candidates.add(sample.getWorld().getBlockAt(sample.getX(), y, z));
+                    }
+                }
+            }
+        }
+        return candidates;
     }
 }
