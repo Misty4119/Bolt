@@ -13,6 +13,7 @@ repositories {
 dependencies {
     compileOnly(group = "io.canvasmc.canvas", name = "canvas-api", version = "26.2.build.923-stable")
     implementation("com.zaxxer:HikariCP:${project.property("hikariVersion")}")
+    implementation("com.google.code.gson:gson:${project.property("gsonVersion")}")
     implementation("org.postgresql:postgresql:${project.property("postgresqlDriverVersion")}")
     implementation("com.mysql:mysql-connector-j:${project.property("mysqlDriverVersion")}")
     implementation("org.xerial:sqlite-jdbc:${project.property("sqliteDriverVersion")}")

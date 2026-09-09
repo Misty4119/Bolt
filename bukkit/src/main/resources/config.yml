@@ -11,6 +11,13 @@ database:
   password: ""
   prefix: ""
   properties: [ ]
+redis:
+  enabled: false
+  required: false
+  uri: redis://127.0.0.1:6379
+  namespace: bolt:
+  network-id: default
+  server-id: standalone
 protections:
   private:
     default: true
