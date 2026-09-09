@@ -80,7 +80,15 @@ public class SimpleProtectionCache implements Store, VersionedStore, AuditStore 
 
     @Override
     public CompletableFuture<Collection<BlockProtection>> loadBlockProtections() {
-        return CompletableFuture.completedFuture(cachedBlocks.values());
+        return reconcile(backingStore.loadBlockProtections(), loaded -> {
+            loaded.forEach(this::cacheBlock);
+            final java.util.Set<UUID> loadedIds = loaded.stream()
+                    .map(BlockProtection::getId)
+                    .collect(java.util.stream.Collectors.toSet());
+            cachedBlocks.keySet().removeIf(id -> !loadedIds.contains(id));
+            cachedBlockIdLocation.entrySet().removeIf(entry -> !loadedIds.contains(entry.getValue()));
+            return java.util.List.copyOf(loaded);
+        });
     }
 
     @Override
@@ -145,7 +153,14 @@ public class SimpleProtectionCache implements Store, VersionedStore, AuditStore 
 
     @Override
     public CompletableFuture<Collection<EntityProtection>> loadEntityProtections() {
-        return CompletableFuture.completedFuture(cachedEntities.values());
+        return reconcile(backingStore.loadEntityProtections(), loaded -> {
+            loaded.forEach(protection -> cachedEntities.put(protection.getId(), protection));
+            final java.util.Set<UUID> loadedIds = loaded.stream()
+                    .map(EntityProtection::getId)
+                    .collect(java.util.stream.Collectors.toSet());
+            cachedEntities.keySet().removeIf(id -> !loadedIds.contains(id));
+            return java.util.List.copyOf(loaded);
+        });
     }
 
     @Override
@@ -199,7 +214,14 @@ public class SimpleProtectionCache implements Store, VersionedStore, AuditStore 
 
     @Override
     public CompletableFuture<Collection<Group>> loadGroups() {
-        return CompletableFuture.completedFuture(cachedGroups.values());
+        return reconcile(backingStore.loadGroups(), loaded -> {
+            loaded.forEach(group -> cachedGroups.put(group.getName(), group));
+            final java.util.Set<String> loadedNames = loaded.stream()
+                    .map(Group::getName)
+                    .collect(java.util.stream.Collectors.toSet());
+            cachedGroups.keySet().removeIf(name -> !loadedNames.contains(name));
+            return java.util.List.copyOf(loaded);
+        });
     }
 
     @Override
@@ -253,7 +275,14 @@ public class SimpleProtectionCache implements Store, VersionedStore, AuditStore 
 
     @Override
     public CompletableFuture<Collection<AccessList>> loadAccessLists() {
-        return CompletableFuture.completedFuture(cachedAccessLists.values());
+        return reconcile(backingStore.loadAccessLists(), loaded -> {
+            loaded.forEach(accessList -> cachedAccessLists.put(accessList.getOwner(), accessList));
+            final java.util.Set<UUID> loadedOwners = loaded.stream()
+                    .map(AccessList::getOwner)
+                    .collect(java.util.stream.Collectors.toSet());
+            cachedAccessLists.keySet().removeIf(owner -> !loadedOwners.contains(owner));
+            return java.util.List.copyOf(loaded);
+        });
     }
 
     @Override
@@ -335,6 +364,11 @@ public class SimpleProtectionCache implements Store, VersionedStore, AuditStore 
         cachedBlockLocationId.put(blockLocation, id);
         cachedBlockIdLocation.put(id, blockLocation);
         cachedBlocks.put(id, protection);
+    }
+
+    private <T, R> CompletableFuture<R> reconcile(final CompletableFuture<Collection<T>> loaded,
+                                                  final java.util.function.Function<Collection<T>, R> updater) {
+        return loaded.thenApply(updater);
     }
 
     private BlockProtection readRedisBlock(final BlockLocation location) {
