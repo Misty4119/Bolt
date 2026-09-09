@@ -1,0 +1,16 @@
+CREATE TABLE IF NOT EXISTS ${prefix}bolt_schema_version (version INTEGER PRIMARY KEY, installed_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ${prefix}bolt_worlds (world_id TEXT PRIMARY KEY, world_uuid TEXT NOT NULL UNIQUE, name TEXT NOT NULL, server_group TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, version INTEGER NOT NULL, UNIQUE (name, server_group));
+CREATE TABLE IF NOT EXISTS ${prefix}bolt_blocks (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, type TEXT NOT NULL, created_at INTEGER NOT NULL, accessed_at INTEGER NOT NULL, world_id TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, block TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE (world_id, x, y, z));
+CREATE TABLE IF NOT EXISTS ${prefix}bolt_entities (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, type TEXT NOT NULL, created_at INTEGER NOT NULL, accessed_at INTEGER NOT NULL, entity TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ${prefix}bolt_access_entries (protection_id TEXT NOT NULL, subject_type TEXT NOT NULL, subject_id TEXT NOT NULL, action TEXT NOT NULL, effect TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (protection_id, subject_type, subject_id, action));
+CREATE TABLE IF NOT EXISTS ${prefix}bolt_groups (name TEXT PRIMARY KEY, owner_id TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ${prefix}bolt_group_members (group_name TEXT NOT NULL, player_id TEXT NOT NULL, role TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (group_name, player_id));
+CREATE TABLE IF NOT EXISTS ${prefix}bolt_access_lists (owner_id TEXT PRIMARY KEY, version INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ${prefix}bolt_hopper_rules (id TEXT PRIMARY KEY, protection_id TEXT NOT NULL, direction TEXT NOT NULL, match_kind TEXT NOT NULL, match_value TEXT NOT NULL, effect TEXT NOT NULL, priority INTEGER NOT NULL, quantity_limit INTEGER, version INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ${prefix}bolt_audit_events (id TEXT PRIMARY KEY, actor_id TEXT, source_type TEXT NOT NULL, source_id TEXT, action TEXT NOT NULL, protection_id TEXT, world_id TEXT, x INTEGER, y INTEGER, z INTEGER, item_type TEXT, item_amount INTEGER, metadata TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ${prefix}bolt_outbox (id TEXT PRIMARY KEY, event_type TEXT NOT NULL, aggregate_type TEXT NOT NULL, aggregate_id TEXT NOT NULL, aggregate_version INTEGER NOT NULL, payload TEXT NOT NULL, published_at INTEGER, attempts INTEGER NOT NULL, created_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS ${prefix}bolt_blocks_location ON ${prefix}bolt_blocks(world_id, x, y, z);
+CREATE INDEX IF NOT EXISTS ${prefix}bolt_blocks_owner ON ${prefix}bolt_blocks(owner_id);
+CREATE INDEX IF NOT EXISTS ${prefix}bolt_entities_owner ON ${prefix}bolt_entities(owner_id);
+CREATE INDEX IF NOT EXISTS ${prefix}bolt_audit_target ON ${prefix}bolt_audit_events(protection_id, created_at);
+CREATE INDEX IF NOT EXISTS ${prefix}bolt_outbox_pending ON ${prefix}bolt_outbox(published_at, created_at);
