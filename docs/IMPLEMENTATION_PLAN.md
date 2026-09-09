@@ -18,6 +18,24 @@
 - 第一版 GUI 是 Inventory GUI：保護資訊、擁有者、玩家/群組 ACL、細粒度權限；不把遠端倉庫與 Audit 全部塞入第一個畫面。
 - 傳送門建立只要事件涉及任一受保護方塊，預設整個取消；擁有者與管理員第一版也沒有例外。
 
+## 1.1 本輪執行狀態
+
+已落地並已通過本地測試或 PlugDev 實機驗收：
+
+- normalized SQL schema、SQLite／MySQL／PostgreSQL dialect、HikariCP 與 schema version runner。
+- optimistic CAS version、SQL transaction barrier、Redis L1/L2 protection cache、Pub/Sub invalidation，以及跨服 collection reconciliation。
+- PortalCreateEvent 加上 Nether frame 幾何檢查，並在 flint/fireball 的 BlockIgniteEvent 前置攔截。
+- 漏斗輸入／輸出權限分離、非玩家 source audit event、read-mostly protection GUI。
+- 移除舊 migration、匯入／匯出及舊 storage command；此分支是 fresh-schema breaking change。
+- PlugDev Velocity-CTD + 兩個 Canvas 26.2 backend fixture、Mineflayer 玩家流程與 literal block matrix。
+
+仍依本文件後續階段排程，尚未宣稱完成的項目：
+
+- Hopper Material/Tag/count filtering、完整 ACL 編輯 GUI、Audit 分頁 GUI、glow/packet feedback、Web dashboard。
+- Redis Sentinel/Cluster、SQL watermark scheduler/outbox 的完整可靠投遞，以及 PostgreSQL 18／MySQL 9 真實服務整合測試。
+
+這些項目保留在計劃內，不能以目前已通過的 SQLite／Redis／Canvas 驗收結果代替。
+
 ## 2. 現況基線
 
 目前程式已有：
@@ -81,8 +99,8 @@ Platform adapter (Bukkit/Canvas/Folia)
 ### 4.2 主要資料表
 
 - `bolt_worlds`：canonical `world_id`、world UUID、名稱、server group；同一 UUID 與名稱若映射不一致則拒絕啟動/寫入。
-- `bolt_block_protections`：protection UUID、world ID、x/y/z、block type、owner UUID、protection type、timestamps、version、accessed time。
-- `bolt_entity_protections`：entity UUID、type、owner、protection type、timestamps、version。
+- `bolt_blocks`：protection UUID、world ID、x/y/z、block type、owner UUID、protection type、timestamps、version、accessed time。
+- `bolt_entities`：entity UUID、type、owner、protection type、timestamps、version。
 - `bolt_access_entries`：protection UUID、subject type、subject ID、action、effect、version。
 - `bolt_groups`：group ID/name/owner/version。
 - `bolt_group_members`：group ID、player UUID、role、version。
@@ -120,7 +138,7 @@ Redis 8+ 支援 standalone 與 Sentinel；Cluster 留作後續版本。連線支
 1. 讀取先查 L1；miss 查 L2；再 miss 查 SQL，成功後填入 L2/L1。
 2. 寫入以 SQL transaction 為先，成功後發布 invalidation；本機先更新或失效自己的 L1。
 3. 其他服收到 invalidation 後比較 version，只能刪除/更新較舊資料。
-4. 定期以 SQL `updated_at`/version watermark reconciliation 修復 Pub/Sub 丟失。
+4. 定期以 SQL `updated_at`/version watermark reconciliation 修復 Pub/Sub 丟失；目前 collection read 已提供同步回源 reconciliation，排程 watermark worker 列入下一階段。
 5. Redis 不可用時，跨服安全操作拒絕；單服也不使用未確認的共享資料。
 
 ## 6. 權限與事件策略
@@ -190,12 +208,12 @@ PlugDev fixture 需要：
 
 自動化測試層：
 
-1. Java unit：action evaluator、dialect、CAS、portal policy、MiniMessage placeholder。
+1. Java unit：action evaluator、dialect、CAS、portal policy、MiniMessage placeholder；目前已有 dialect/schema/cache/portal/transport coverage。
 2. Java platform tests：事件 listeners、inventory transport、GUI action。
 3. SQL integration：PG/MySQL/SQLite schema、transaction、concurrency、reconnect。
 4. Redis integration：L1/L2、invalidations、reconciliation、standalone/Sentinel、故障。
-5. PlugDev E2E：雙 Canvas 服經 Velocity-CTD 互相建立/修改/讀取/撤銷保護，檢查跨服約 1 秒內生效。
-6. Block matrix：容器、門、活塞、流體、火、爆炸、紅石、漏斗、Nether Portal、End Portal 及 matcher 連體方塊。
+5. PlugDev E2E：雙 Canvas 服經 Velocity-CTD 互相建立/修改/讀取/撤銷保護，檢查跨服約 1 秒內生效；目前已驗收建立、Redis L2 hydration、GUI、非 OP 拒絕、漏斗、Nether portal。
+6. Block matrix：容器、門、活塞、流體、火、爆炸、紅石、漏斗、Nether Portal、End Portal 及 matcher 連體方塊；目前已逐一驗收 config literal 的 20 種 block，特殊事件仍按階段補齊。
 7. Failure matrix：SQL down、Redis down、Pub/Sub 丟失、CAS conflict、backend restart、proxy reconnect。
 
 驗收門檻：
