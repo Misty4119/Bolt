@@ -1,564 +1,599 @@
 package org.popcraft.bolt.data;
 
-import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import org.popcraft.bolt.access.AccessList;
-import org.popcraft.bolt.data.sql.Statements;
+import org.popcraft.bolt.data.sql.DatabaseType;
+import org.popcraft.bolt.data.sql.SchemaManager;
+import org.popcraft.bolt.data.sql.SqlDialect;
 import org.popcraft.bolt.protection.BlockProtection;
 import org.popcraft.bolt.protection.EntityProtection;
 import org.popcraft.bolt.util.BlockLocation;
 import org.popcraft.bolt.util.Group;
-import org.popcraft.bolt.util.Metrics;
 
 import java.io.IOException;
-import java.lang.reflect.Type;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.LogManager;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public class SQLStore implements Store {
-    private static final Gson GSON = new Gson();
-    private static final TypeToken<HashMap<String, String>> ACCESS_LIST_TYPE_TOKEN = new TypeToken<>() {
-    };
-    private static final TypeToken<List<String>> PLAYER_LIST_TYPE_TOKEN = new TypeToken<>() {
-    };
-    private static final Type ACCESS_LIST_TYPE = ACCESS_LIST_TYPE_TOKEN.getType();
-    private static final Type PLAYER_LIST_TYPE = PLAYER_LIST_TYPE_TOKEN.getType();
-    private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
-    private final Map<UUID, BlockProtection> saveBlocks = new HashMap<>();
-    private final Map<UUID, BlockProtection> removeBlocks = new HashMap<>();
-    private final Map<UUID, EntityProtection> saveEntities = new HashMap<>();
-    private final Map<UUID, EntityProtection> removeEntities = new HashMap<>();
-    private final Map<String, Group> saveGroups = new HashMap<>();
-    private final Map<String, Group> removeGroups = new HashMap<>();
-    private final Map<UUID, AccessList> saveAccessLists = new HashMap<>();
-    private final Map<UUID, AccessList> removeAccessLists = new HashMap<>();
+    private static final Logger LOGGER = Logger.getLogger(SQLStore.class.getName());
+    private static final List<String> BLOCK_COLUMNS = List.of(
+            "id", "owner_id", "type", "created_at", "accessed_at", "world_id", "x", "y", "z", "block", "version", "updated_at"
+    );
+    private static final List<String> ENTITY_COLUMNS = List.of(
+            "id", "owner_id", "type", "created_at", "accessed_at", "entity", "version", "updated_at"
+    );
+    private static final List<String> GROUP_COLUMNS = List.of(
+            "name", "owner_id", "created_at", "updated_at", "version"
+    );
+    private static final List<String> ACCESS_LIST_COLUMNS = List.of(
+            "owner_id", "version", "updated_at"
+    );
+
+    private final ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
+        final Thread thread = new Thread(runnable, "Bolt-SQL");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        final Thread thread = new Thread(runnable, "Bolt-SQL-Scheduler");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private final AtomicLong pending = new AtomicLong();
     private final Configuration configuration;
-    private final String connectionUrl;
-    private Connection connection;
+    private final DatabaseType databaseType;
+    private final SqlDialect dialect;
+    private final String prefix;
+    private final HikariDataSource dataSource;
 
     public SQLStore(final Configuration configuration) {
         this.configuration = configuration;
-        if ("sqlite".equals(configuration.type())) {
-            try {
-                Files.createDirectories(Path.of(".").resolve(configuration.path()).getParent());
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-        final boolean usingMySQL = "mysql".equals(configuration.type());
-        this.connectionUrl = usingMySQL ?
-                "jdbc:mysql://%s/%s".formatted(configuration.hostname(), configuration.database()) :
-                "jdbc:sqlite:%s".formatted(configuration.path());
-        reconnect();
-        try (final PreparedStatement createBlocksTable = connection.prepareStatement(Statements.CREATE_TABLE_BLOCKS.get(configuration.type()).formatted(configuration.prefix()));
-             final PreparedStatement createEntitiesTable = connection.prepareStatement(Statements.CREATE_TABLE_ENTITIES.get(configuration.type()).formatted(configuration.prefix()));
-             final PreparedStatement createGroupsTable = connection.prepareStatement(Statements.CREATE_TABLE_GROUPS.get(configuration.type()).formatted(configuration.prefix()));
-             final PreparedStatement createAccessTable = connection.prepareStatement(Statements.CREATE_TABLE_ACCESS.get(configuration.type()).formatted(configuration.prefix()))) {
-            createBlocksTable.execute();
-            createEntitiesTable.execute();
-            createGroupsTable.execute();
-            createAccessTable.execute();
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-        if (!usingMySQL) {
-            try (final PreparedStatement createBlocksOwnerIndex = connection.prepareStatement(Statements.CREATE_INDEX_BLOCK_OWNER.get(configuration.type()).formatted(configuration.prefix()));
-                 final PreparedStatement createBlocksLocationIndex = connection.prepareStatement(Statements.CREATE_INDEX_BLOCK_LOCATION.get(configuration.type()).formatted(configuration.prefix()));
-                 final PreparedStatement createEntitiesOwnerIndex = connection.prepareStatement(Statements.CREATE_INDEX_ENTITY_OWNER.get(configuration.type()).formatted(configuration.prefix()));
-                 final PreparedStatement createGroupsOwnerIndex = connection.prepareStatement(Statements.CREATE_INDEX_GROUP_OWNER.get(configuration.type()).formatted(configuration.prefix()))) {
-                createBlocksOwnerIndex.execute();
-                createBlocksLocationIndex.execute();
-                createEntitiesOwnerIndex.execute();
-                createGroupsOwnerIndex.execute();
-            } catch (SQLException e) {
-                e.printStackTrace();
-            }
-        }
-        executor.scheduleWithFixedDelay(this::flush, 30, 30, TimeUnit.SECONDS);
-        if (usingMySQL) {
-            executor.scheduleWithFixedDelay(this::reconnect, 30, 30, TimeUnit.MINUTES);
-        }
+        this.databaseType = DatabaseType.parse(configuration.type());
+        this.dialect = SqlDialect.forType(databaseType);
+        this.prefix = configuration.prefix();
+        validatePrefix(prefix);
+        prepareSqlitePath();
+        this.dataSource = createDataSource();
+        initializeSchema();
+        scheduler.scheduleWithFixedDelay(this::flushSafely, 30, 30, TimeUnit.SECONDS);
     }
 
     public record Configuration(String type, String path, String hostname, String database, String username,
                                 String password, String prefix, Map<String, String> properties) {
-    }
-
-    private void reconnect() {
-        try {
-            if (connection != null) {
-                connection.close();
-            }
-            connection = DriverManager.getConnection(connectionUrl, configuration.username(), configuration.password());
-        } catch (SQLException e) {
-            e.printStackTrace();
+        public Configuration {
+            type = type == null || type.isBlank() ? "sqlite" : type;
+            path = path == null || path.isBlank() ? "plugins/Bolt/bolt.db" : path;
+            hostname = hostname == null ? "" : hostname;
+            database = database == null ? "" : database;
+            username = username == null ? "" : username;
+            password = password == null ? "" : password;
+            prefix = prefix == null ? "" : prefix;
+            properties = properties == null ? Map.of() : Map.copyOf(properties);
         }
     }
 
-    public void close() {
-        this.executor.close();
+    public DatabaseType databaseType() {
+        return databaseType;
+    }
+
+    private void prepareSqlitePath() {
+        if (!databaseType.fileBacked()) {
+            return;
+        }
         try {
-            this.connection.close();
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
+            final Path databasePath = Path.of(configuration.path()).toAbsolutePath();
+            final Path parent = databasePath.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+        } catch (IOException exception) {
+            throw new IllegalStateException("Unable to create SQLite database directory", exception);
+        }
+    }
+
+    private HikariDataSource createDataSource() {
+        final HikariConfig hikari = new HikariConfig();
+        hikari.setPoolName("Bolt-" + databaseType.configValue());
+        hikari.setJdbcUrl(connectionUrl());
+        hikari.setMaximumPoolSize(databaseType.fileBacked() ? 1 : 10);
+        hikari.setMinimumIdle(databaseType.fileBacked() ? 1 : 2);
+        hikari.setAutoCommit(true);
+        if (!configuration.username().isBlank()) {
+            hikari.setUsername(configuration.username());
+        }
+        if (!configuration.password().isBlank()) {
+            hikari.setPassword(configuration.password());
+        }
+        configuration.properties().forEach(hikari::addDataSourceProperty);
+        if (databaseType == DatabaseType.SQLITE) {
+            hikari.setConnectionInitSql("PRAGMA foreign_keys = ON");
+        }
+        return new HikariDataSource(hikari);
+    }
+
+    private String connectionUrl() {
+        return switch (databaseType) {
+            case SQLITE -> "jdbc:sqlite:" + configuration.path();
+            case MYSQL -> "jdbc:mysql://%s/%s".formatted(configuration.hostname(), configuration.database());
+            case POSTGRES -> "jdbc:postgresql://%s/%s".formatted(configuration.hostname(), configuration.database());
+        };
+    }
+
+    private void initializeSchema() {
+        try (Connection connection = dataSource.getConnection()) {
+            SchemaManager.initialize(connection, databaseType, prefix);
+        } catch (SQLException exception) {
+            dataSource.close();
+            throw new IllegalStateException("Unable to initialize Bolt " + databaseType.configValue() + " schema", exception);
+        }
+    }
+
+    private String table(final String name) {
+        return dialect.quoteIdentifier(tableName(name));
+    }
+
+    private String tableName(final String name) {
+        return prefix + "bolt_" + name;
+    }
+
+    private static void validatePrefix(final String prefix) {
+        if (!prefix.matches("[A-Za-z0-9_]*")) {
+            throw new IllegalArgumentException("Unsafe database table prefix: " + prefix);
         }
     }
 
     @Override
-    public CompletableFuture<BlockProtection> loadBlockProtection(BlockLocation location) {
-        final CompletableFuture<BlockProtection> future = new CompletableFuture<>();
-        CompletableFuture.runAsync(() -> {
-            try (final PreparedStatement selectBlock = connection.prepareStatement(Statements.SELECT_BLOCK_BY_LOCATION.get(configuration.type()).formatted(configuration.prefix()))) {
-                selectBlock.setString(1, location.world());
-                selectBlock.setInt(2, location.x());
-                selectBlock.setInt(3, location.y());
-                selectBlock.setInt(4, location.z());
-                final ResultSet blockResultSet = selectBlock.executeQuery();
-                if (blockResultSet.next()) {
-                    future.complete(blockProtectionFromResultSet(blockResultSet));
+    public CompletableFuture<BlockProtection> loadBlockProtection(final BlockLocation location) {
+        return submit(connection -> {
+            final String sql = "SELECT id, owner_id, type, created_at, accessed_at, world_id, x, y, z, block, version, updated_at FROM %s WHERE world_id = ? AND x = ? AND y = ? AND z = ?".formatted(table("blocks"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, location.world());
+                statement.setInt(2, location.x());
+                statement.setInt(3, location.y());
+                statement.setInt(4, location.z());
+                try (ResultSet result = statement.executeQuery()) {
+                    return result.next() ? readBlock(connection, result) : null;
                 }
-            } catch (SQLException e) {
-                e.printStackTrace();
             }
-            Metrics.recordProtectionAccess(false);
-            future.complete(null);
-        }, executor);
-        return future;
+        });
     }
 
     @Override
     public CompletableFuture<Collection<BlockProtection>> loadBlockProtections() {
-        final CompletableFuture<Collection<BlockProtection>> future = new CompletableFuture<>();
-        CompletableFuture.runAsync(() -> {
-            final long startTimeNanos = System.nanoTime();
-            long[] count = new long[1];
-            try (final PreparedStatement selectBlocks = connection.prepareStatement(Statements.SELECT_ALL_BLOCKS.get(configuration.type()).formatted(configuration.prefix()))) {
-                final ResultSet blocksResultSet = selectBlocks.executeQuery();
-                final List<BlockProtection> protections = new ArrayList<>();
-                while (blocksResultSet.next()) {
-                    protections.add(blockProtectionFromResultSet(blocksResultSet));
-                    ++count[0];
+        return submit(connection -> {
+            final String sql = "SELECT id, owner_id, type, created_at, accessed_at, world_id, x, y, z, block, version, updated_at FROM %s".formatted(table("blocks"));
+            final List<BlockProtection> protections = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement(sql);
+                 ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    protections.add(readBlock(connection, result));
                 }
-                final long timeNanos = System.nanoTime() - startTimeNanos;
-                final double timeMillis = timeNanos / 1e6d;
-                LogManager.getLogManager().getLogger("").info(() -> "Loaded %d block protections in %.3f ms".formatted(count[0], timeMillis));
-                future.complete(protections);
-            } catch (SQLException e) {
-                e.printStackTrace();
             }
-            future.complete(Collections.emptyList());
-        }, executor);
-        return future;
+            return protections;
+        });
     }
 
-    private BlockProtection blockProtectionFromResultSet(final ResultSet resultSet) throws SQLException {
-        final String id = resultSet.getString(1);
-        final String owner = resultSet.getString(2);
-        final String type = resultSet.getString(3);
-        final long created = resultSet.getLong(4);
-        final long accessed = resultSet.getLong(5);
-        final String accessText = resultSet.getString(6);
-        final Map<String, String> access = Objects.requireNonNullElse(GSON.fromJson(accessText, ACCESS_LIST_TYPE_TOKEN), new HashMap<>());
-        final String world = resultSet.getString(7);
-        final int x = resultSet.getInt(8);
-        final int y = resultSet.getInt(9);
-        final int z = resultSet.getInt(10);
-        final String block = resultSet.getString(11);
-        return new BlockProtection(UUID.fromString(id), UUID.fromString(owner), type, created, accessed, access, world, x, y, z, block);
-    }
-
-    @Override
-    public void saveBlockProtection(BlockProtection protection) {
-        CompletableFuture.runAsync(() -> saveBlocks.put(protection.getId(), protection), executor);
-    }
-
-    private void saveBlockProtectionNow(BlockProtection protection) {
-        try (final PreparedStatement replaceBlock = connection.prepareStatement(Statements.REPLACE_BLOCK.get(configuration.type()).formatted(configuration.prefix()))) {
-            replaceBlock.setString(1, protection.getId().toString());
-            replaceBlock.setString(2, protection.getOwner().toString());
-            replaceBlock.setString(3, protection.getType());
-            replaceBlock.setLong(4, protection.getCreated());
-            replaceBlock.setLong(5, protection.getAccessed());
-            replaceBlock.setString(6, GSON.toJson(protection.getAccess(), ACCESS_LIST_TYPE));
-            replaceBlock.setString(7, protection.getWorld());
-            replaceBlock.setInt(8, protection.getX());
-            replaceBlock.setInt(9, protection.getY());
-            replaceBlock.setInt(10, protection.getZ());
-            replaceBlock.setString(11, protection.getBlock());
-            replaceBlock.execute();
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
+    private BlockProtection readBlock(final Connection connection, final ResultSet result) throws SQLException {
+        return new BlockProtection(
+                UUID.fromString(result.getString("id")),
+                UUID.fromString(result.getString("owner_id")),
+                result.getString("type"),
+                result.getLong("created_at"),
+                result.getLong("accessed_at"),
+                loadProtectionAccess(connection, result.getString("id")),
+                result.getString("world_id"),
+                result.getInt("x"),
+                result.getInt("y"),
+                result.getInt("z"),
+                result.getString("block")
+        );
     }
 
     @Override
-    public void removeBlockProtection(BlockProtection protection) {
-        CompletableFuture.runAsync(() -> {
-            final UUID id = protection.getId();
-            saveBlocks.remove(id);
-            removeBlocks.put(id, protection);
-        }, executor);
+    public void saveBlockProtection(final BlockProtection protection) {
+        submitWrite(connection -> saveBlockNow(connection, protection));
     }
 
-    private void removeBlockProtectionNow(BlockProtection protection) {
-        try (final PreparedStatement deleteBlock = connection.prepareStatement(Statements.DELETE_BLOCK.get(configuration.type()).formatted(configuration.prefix()))) {
-            deleteBlock.setString(1, protection.getId().toString());
-            deleteBlock.execute();
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
+    private void saveBlockNow(final Connection connection, final BlockProtection protection) throws SQLException {
+        inTransaction(connection, () -> {
+            final String sql = dialect.upsert(tableName("blocks"), BLOCK_COLUMNS, List.of("id"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, protection.getId().toString());
+                statement.setString(2, protection.getOwner().toString());
+                statement.setString(3, protection.getType());
+                statement.setLong(4, protection.getCreated());
+                statement.setLong(5, protection.getAccessed());
+                statement.setString(6, protection.getWorld());
+                statement.setInt(7, protection.getX());
+                statement.setInt(8, protection.getY());
+                statement.setInt(9, protection.getZ());
+                statement.setString(10, protection.getBlock());
+                statement.setLong(11, 1);
+                statement.setLong(12, System.currentTimeMillis());
+                statement.executeUpdate();
+            }
+            replaceProtectionAccess(connection, protection.getId().toString(), protection.getAccess());
+        });
     }
 
     @Override
-    public CompletableFuture<EntityProtection> loadEntityProtection(UUID id) {
-        final CompletableFuture<EntityProtection> future = new CompletableFuture<>();
-        CompletableFuture.runAsync(() -> {
-            try (final PreparedStatement selectEntity = connection.prepareStatement(Statements.SELECT_ENTITY_BY_UUID.get(configuration.type()).formatted(configuration.prefix()))) {
-                selectEntity.setString(1, id.toString());
-                final ResultSet entityResultSet = selectEntity.executeQuery();
-                if (entityResultSet.next()) {
-                    future.complete(entityProtectionFromResultSet(entityResultSet));
+    public void removeBlockProtection(final BlockProtection protection) {
+        submitWrite(connection -> inTransaction(connection, () -> {
+            deleteProtectionAccess(connection, protection.getId().toString());
+            delete(connection, table("blocks"), "id", protection.getId().toString());
+        }));
+    }
+
+    @Override
+    public CompletableFuture<EntityProtection> loadEntityProtection(final UUID id) {
+        return submit(connection -> {
+            final String sql = "SELECT id, owner_id, type, created_at, accessed_at, entity, version, updated_at FROM %s WHERE id = ?".formatted(table("entities"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, id.toString());
+                try (ResultSet result = statement.executeQuery()) {
+                    return result.next() ? readEntity(connection, result) : null;
                 }
-            } catch (SQLException e) {
-                e.printStackTrace();
             }
-            Metrics.recordProtectionAccess(false);
-            future.complete(null);
-        }, executor);
-        return future;
+        });
     }
 
     @Override
     public CompletableFuture<Collection<EntityProtection>> loadEntityProtections() {
-        final CompletableFuture<Collection<EntityProtection>> future = new CompletableFuture<>();
-        CompletableFuture.runAsync(() -> {
-            final long startTimeNanos = System.nanoTime();
-            long[] count = new long[1];
-            try (final PreparedStatement selectEntities = connection.prepareStatement(Statements.SELECT_ALL_ENTITIES.get(configuration.type()).formatted(configuration.prefix()))) {
-                final ResultSet entitiesResultSet = selectEntities.executeQuery();
-                final List<EntityProtection> protections = new ArrayList<>();
-                while (entitiesResultSet.next()) {
-                    protections.add(entityProtectionFromResultSet(entitiesResultSet));
-                    ++count[0];
+        return submit(connection -> {
+            final String sql = "SELECT id, owner_id, type, created_at, accessed_at, entity, version, updated_at FROM %s".formatted(table("entities"));
+            final List<EntityProtection> protections = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement(sql);
+                 ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    protections.add(readEntity(connection, result));
                 }
-                final long timeNanos = System.nanoTime() - startTimeNanos;
-                final double timeMillis = timeNanos / 1e6d;
-                LogManager.getLogManager().getLogger("").info(() -> "Loaded %d entity protections in %.3f ms".formatted(count[0], timeMillis));
-                future.complete(protections);
-            } catch (SQLException e) {
-                e.printStackTrace();
             }
-            future.complete(Collections.emptyList());
-        }, executor);
-        return future;
+            return protections;
+        });
     }
 
-    private EntityProtection entityProtectionFromResultSet(final ResultSet resultSet) throws SQLException {
-        final String id = resultSet.getString(1);
-        final String owner = resultSet.getString(2);
-        final String type = resultSet.getString(3);
-        final long created = resultSet.getLong(4);
-        final long accessed = resultSet.getLong(5);
-        final String accessText = resultSet.getString(6);
-        final Map<String, String> access = Objects.requireNonNullElse(GSON.fromJson(accessText, ACCESS_LIST_TYPE_TOKEN), new HashMap<>());
-        final String entity = resultSet.getString(7);
-        return new EntityProtection(UUID.fromString(id), UUID.fromString(owner), type, created, accessed, access, entity);
+    private EntityProtection readEntity(final Connection connection, final ResultSet result) throws SQLException {
+        return new EntityProtection(
+                UUID.fromString(result.getString("id")),
+                UUID.fromString(result.getString("owner_id")),
+                result.getString("type"),
+                result.getLong("created_at"),
+                result.getLong("accessed_at"),
+                loadProtectionAccess(connection, result.getString("id")),
+                result.getString("entity")
+        );
     }
 
     @Override
-    public void saveEntityProtection(EntityProtection protection) {
-        CompletableFuture.runAsync(() -> saveEntities.put(protection.getId(), protection), executor);
+    public void saveEntityProtection(final EntityProtection protection) {
+        submitWrite(connection -> saveEntityNow(connection, protection));
     }
 
-    private void saveEntityProtectionNow(EntityProtection protection) {
-        try (final PreparedStatement replaceEntity = connection.prepareStatement(Statements.REPLACE_ENTITY.get(configuration.type()).formatted(configuration.prefix()))) {
-            replaceEntity.setString(1, protection.getId().toString());
-            replaceEntity.setString(2, protection.getOwner().toString());
-            replaceEntity.setString(3, protection.getType());
-            replaceEntity.setLong(4, protection.getCreated());
-            replaceEntity.setLong(5, protection.getAccessed());
-            replaceEntity.setString(6, GSON.toJson(protection.getAccess(), ACCESS_LIST_TYPE));
-            replaceEntity.setString(7, protection.getEntity());
-            replaceEntity.execute();
-        } catch (SQLException e) {
-            e.printStackTrace();
+    private void saveEntityNow(final Connection connection, final EntityProtection protection) throws SQLException {
+        inTransaction(connection, () -> {
+            final String sql = dialect.upsert(tableName("entities"), ENTITY_COLUMNS, List.of("id"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, protection.getId().toString());
+                statement.setString(2, protection.getOwner().toString());
+                statement.setString(3, protection.getType());
+                statement.setLong(4, protection.getCreated());
+                statement.setLong(5, protection.getAccessed());
+                statement.setString(6, protection.getEntity());
+                statement.setLong(7, 1);
+                statement.setLong(8, System.currentTimeMillis());
+                statement.executeUpdate();
+            }
+            replaceProtectionAccess(connection, protection.getId().toString(), protection.getAccess());
+        });
+    }
+
+    @Override
+    public void removeEntityProtection(final EntityProtection protection) {
+        submitWrite(connection -> inTransaction(connection, () -> {
+            deleteProtectionAccess(connection, protection.getId().toString());
+            delete(connection, table("entities"), "id", protection.getId().toString());
+        }));
+    }
+
+    private Map<String, String> loadProtectionAccess(final Connection connection, final String protectionId) throws SQLException {
+        final Map<String, String> access = new LinkedHashMap<>();
+        final String sql = "SELECT subject_id, effect AS access_type FROM %s WHERE protection_id = ?".formatted(table("access_entries"));
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, protectionId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    access.put(result.getString("subject_id"), result.getString("access_type"));
+                }
+            }
+        }
+        return access;
+    }
+
+    private void replaceProtectionAccess(final Connection connection, final String protectionId, final Map<String, String> access) throws SQLException {
+        deleteProtectionAccess(connection, protectionId);
+        final String sql = "INSERT INTO %s (protection_id, subject_type, subject_id, action, effect, version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)".formatted(table("access_entries"));
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            for (final Map.Entry<String, String> entry : access.entrySet()) {
+                statement.setString(1, protectionId);
+                statement.setString(2, "source");
+                statement.setString(3, entry.getKey());
+                statement.setString(4, "access_type");
+                statement.setString(5, entry.getValue());
+                statement.setLong(6, 1);
+                statement.setLong(7, System.currentTimeMillis());
+                statement.addBatch();
+            }
+            statement.executeBatch();
         }
     }
 
-    @Override
-    public void removeEntityProtection(EntityProtection protection) {
-        CompletableFuture.runAsync(() -> {
-            saveEntities.remove(protection.getId());
-            removeEntities.put(protection.getId(), protection);
-        }, executor);
-    }
-
-    private void removeEntityProtectionNow(EntityProtection protection) {
-        try (final PreparedStatement deleteEntity = connection.prepareStatement(Statements.DELETE_ENTITY.get(configuration.type()).formatted(configuration.prefix()))) {
-            deleteEntity.setString(1, protection.getId().toString());
-            deleteEntity.execute();
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
+    private void deleteProtectionAccess(final Connection connection, final String protectionId) throws SQLException {
+        delete(connection, table("access_entries"), "protection_id", protectionId);
     }
 
     @Override
-    public CompletableFuture<Group> loadGroup(String group) {
-        final CompletableFuture<Group> future = new CompletableFuture<>();
-        CompletableFuture.runAsync(() -> {
-            try (final PreparedStatement selectGroup = connection.prepareStatement(Statements.SELECT_GROUP_BY_NAME.get(configuration.type()).formatted(configuration.prefix()))) {
-                selectGroup.setString(1, group);
-                final ResultSet groupResultSet = selectGroup.executeQuery();
-                if (groupResultSet.next()) {
-                    future.complete(groupFromResultSet(groupResultSet));
+    public CompletableFuture<Group> loadGroup(final String group) {
+        return submit(connection -> {
+            final String sql = "SELECT name, owner_id FROM %s WHERE name = ?".formatted(table("groups"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, group);
+                try (ResultSet result = statement.executeQuery()) {
+                    return result.next() ? readGroup(connection, result) : null;
                 }
-            } catch (SQLException e) {
-                e.printStackTrace();
             }
-            future.complete(null);
-        }, executor);
-        return future;
+        });
     }
 
     @Override
     public CompletableFuture<Collection<Group>> loadGroups() {
-        final CompletableFuture<Collection<Group>> future = new CompletableFuture<>();
-        CompletableFuture.runAsync(() -> {
-            try (final PreparedStatement selectGroups = connection.prepareStatement(Statements.SELECT_ALL_GROUPS.get(configuration.type()).formatted(configuration.prefix()))) {
-                final ResultSet groupResultSet = selectGroups.executeQuery();
-                final List<Group> groups = new ArrayList<>();
-                while (groupResultSet.next()) {
-                    groups.add(groupFromResultSet(groupResultSet));
+        return submit(connection -> {
+            final String sql = "SELECT name, owner_id FROM %s".formatted(table("groups"));
+            final List<Group> groups = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement(sql);
+                 ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    groups.add(readGroup(connection, result));
                 }
-                future.complete(groups);
-            } catch (SQLException e) {
-                e.printStackTrace();
             }
-            future.complete(Collections.emptyList());
-        }, executor);
-        return future;
+            return groups;
+        });
     }
 
-    private Group groupFromResultSet(final ResultSet resultSet) throws SQLException {
-        final String name = resultSet.getString(1);
-        final String owner = resultSet.getString(2);
-        final String membersText = resultSet.getString(3);
-        final List<String> membersRaw = Objects.requireNonNullElse(GSON.fromJson(membersText, PLAYER_LIST_TYPE_TOKEN), new ArrayList<>());
+    private Group readGroup(final Connection connection, final ResultSet result) throws SQLException {
         final List<UUID> members = new ArrayList<>();
-        membersRaw.forEach(memberRaw -> members.add(UUID.fromString(memberRaw)));
-        return new Group(name, UUID.fromString(owner), members);
-    }
-
-    @Override
-    public void saveGroup(Group group) {
-        CompletableFuture.runAsync(() -> saveGroups.put(group.getName(), group), executor);
-    }
-
-    private void saveGroupNow(Group group) {
-        try (final PreparedStatement replaceGroup = connection.prepareStatement(Statements.REPLACE_GROUP.get(configuration.type()).formatted(configuration.prefix()))) {
-            replaceGroup.setString(1, group.getName());
-            replaceGroup.setString(2, group.getOwner().toString());
-            replaceGroup.setString(3, GSON.toJson(group.getMembers(), PLAYER_LIST_TYPE));
-            replaceGroup.execute();
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-    }
-
-    @Override
-    public void removeGroup(Group group) {
-        CompletableFuture.runAsync(() -> removeGroups.put(group.getName(), group), executor);
-    }
-
-    private void removeGroupNow(Group group) {
-        try (final PreparedStatement deleteGroup = connection.prepareStatement(Statements.DELETE_GROUP.get(configuration.type()).formatted(configuration.prefix()))) {
-            deleteGroup.setString(1, group.getName());
-            deleteGroup.execute();
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-    }
-
-    @Override
-    public CompletableFuture<AccessList> loadAccessList(UUID owner) {
-        final CompletableFuture<AccessList> future = new CompletableFuture<>();
-        CompletableFuture.runAsync(() -> {
-            try (final PreparedStatement selectAccessList = connection.prepareStatement(Statements.SELECT_ACCESS_LIST_BY_UUID.get(configuration.type()).formatted(configuration.prefix()))) {
-                selectAccessList.setString(1, owner.toString());
-                final ResultSet accessListResultSet = selectAccessList.executeQuery();
-                if (accessListResultSet.next()) {
-                    future.complete(accessListFromResultSet(accessListResultSet));
+        final String sql = "SELECT player_id FROM %s WHERE group_name = ?".formatted(table("group_members"));
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, result.getString("name"));
+            try (ResultSet membersResult = statement.executeQuery()) {
+                while (membersResult.next()) {
+                    members.add(UUID.fromString(membersResult.getString("player_id")));
                 }
-            } catch (SQLException e) {
-                e.printStackTrace();
             }
-            future.complete(null);
-        }, executor);
-        return future;
+        }
+        return new Group(result.getString("name"), UUID.fromString(result.getString("owner_id")), members);
+    }
+
+    @Override
+    public void saveGroup(final Group group) {
+        submitWrite(connection -> inTransaction(connection, () -> {
+            final String sql = dialect.upsert(tableName("groups"), GROUP_COLUMNS, List.of("name"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, group.getName());
+                statement.setString(2, group.getOwner().toString());
+                statement.setLong(3, System.currentTimeMillis());
+                statement.setLong(4, System.currentTimeMillis());
+                statement.setLong(5, 1);
+                statement.executeUpdate();
+            }
+            delete(connection, table("group_members"), "group_name", group.getName());
+            final String memberSql = "INSERT INTO %s (group_name, player_id, role, version, updated_at) VALUES (?, ?, ?, ?, ?)".formatted(table("group_members"));
+            try (PreparedStatement statement = connection.prepareStatement(memberSql)) {
+                for (final UUID member : group.getMembers()) {
+                    statement.setString(1, group.getName());
+                    statement.setString(2, member.toString());
+                    statement.setString(3, "member");
+                    statement.setLong(4, 1);
+                    statement.setLong(5, System.currentTimeMillis());
+                    statement.addBatch();
+                }
+                statement.executeBatch();
+            }
+        }));
+    }
+
+    @Override
+    public void removeGroup(final Group group) {
+        submitWrite(connection -> inTransaction(connection, () -> {
+            delete(connection, table("group_members"), "group_name", group.getName());
+            delete(connection, table("groups"), "name", group.getName());
+        }));
+    }
+
+    @Override
+    public CompletableFuture<AccessList> loadAccessList(final UUID owner) {
+        return submit(connection -> readAccessList(connection, owner));
     }
 
     @Override
     public CompletableFuture<Collection<AccessList>> loadAccessLists() {
-        final CompletableFuture<Collection<AccessList>> future = new CompletableFuture<>();
-        CompletableFuture.runAsync(() -> {
-            try (final PreparedStatement selectAccessLists = connection.prepareStatement(Statements.SELECT_ALL_ACCESS_LISTS.get(configuration.type()).formatted(configuration.prefix()))) {
-                final ResultSet accessListsResultSet = selectAccessLists.executeQuery();
-                final List<AccessList> accessLists = new ArrayList<>();
-                while (accessListsResultSet.next()) {
-                    accessLists.add(accessListFromResultSet(accessListsResultSet));
+        return submit(connection -> {
+            final String sql = "SELECT owner_id FROM %s".formatted(table("access_lists"));
+            final List<AccessList> accessLists = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement(sql);
+                 ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    accessLists.add(readAccessList(connection, UUID.fromString(result.getString("owner_id"))));
                 }
-                future.complete(accessLists);
-            } catch (SQLException e) {
-                e.printStackTrace();
             }
-            future.complete(Collections.emptyList());
-        }, executor);
-        return future;
+            return accessLists;
+        });
     }
 
-    private AccessList accessListFromResultSet(final ResultSet resultSet) throws SQLException {
-        final String owner = resultSet.getString(1);
-        final String accessListText = resultSet.getString(2);
-        final Map<String, String> access = Objects.requireNonNullElse(GSON.fromJson(accessListText, ACCESS_LIST_TYPE_TOKEN), new HashMap<>());
-        return new AccessList(UUID.fromString(owner), access);
+    private AccessList readAccessList(final Connection connection, final UUID owner) throws SQLException {
+        final String headerSql = "SELECT owner_id FROM %s WHERE owner_id = ?".formatted(table("access_lists"));
+        try (PreparedStatement header = connection.prepareStatement(headerSql)) {
+            header.setString(1, owner.toString());
+            try (ResultSet result = header.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+            }
+        }
+        final Map<String, String> access = new LinkedHashMap<>();
+        final String entriesSql = "SELECT subject_id, access_type FROM %s WHERE owner_id = ?".formatted(table("access_list_entries"));
+        try (PreparedStatement statement = connection.prepareStatement(entriesSql)) {
+            statement.setString(1, owner.toString());
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    access.put(result.getString("subject_id"), result.getString("access_type"));
+                }
+            }
+        }
+        return new AccessList(owner, access);
     }
 
     @Override
-    public void saveAccessList(AccessList accessList) {
-        CompletableFuture.runAsync(() -> saveAccessLists.put(accessList.getOwner(), accessList), executor);
-    }
-
-    private void saveAccessListNow(AccessList accessList) {
-        try (final PreparedStatement replaceAccessList = connection.prepareStatement(Statements.REPLACE_ACCESS_LIST.get(configuration.type()).formatted(configuration.prefix()))) {
-            replaceAccessList.setString(1, accessList.getOwner().toString());
-            replaceAccessList.setString(2, GSON.toJson(accessList.getAccess(), ACCESS_LIST_TYPE));
-            replaceAccessList.execute();
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
+    public void saveAccessList(final AccessList accessList) {
+        submitWrite(connection -> inTransaction(connection, () -> {
+            final String sql = dialect.upsert(tableName("access_lists"), ACCESS_LIST_COLUMNS, List.of("owner_id"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, accessList.getOwner().toString());
+                statement.setLong(2, 1);
+                statement.setLong(3, System.currentTimeMillis());
+                statement.executeUpdate();
+            }
+            delete(connection, table("access_list_entries"), "owner_id", accessList.getOwner().toString());
+            final String entrySql = "INSERT INTO %s (owner_id, subject_type, subject_id, access_type, version, updated_at) VALUES (?, ?, ?, ?, ?, ?)".formatted(table("access_list_entries"));
+            try (PreparedStatement statement = connection.prepareStatement(entrySql)) {
+                for (final Map.Entry<String, String> entry : accessList.getAccess().entrySet()) {
+                    statement.setString(1, accessList.getOwner().toString());
+                    statement.setString(2, "source");
+                    statement.setString(3, entry.getKey());
+                    statement.setString(4, entry.getValue());
+                    statement.setLong(5, 1);
+                    statement.setLong(6, System.currentTimeMillis());
+                    statement.addBatch();
+                }
+                statement.executeBatch();
+            }
+        }));
     }
 
     @Override
-    public void removeAccessList(AccessList accessList) {
-        CompletableFuture.runAsync(() -> removeAccessLists.put(accessList.getOwner(), accessList), executor);
-    }
-
-    private void removeAccessListNow(AccessList accessList) {
-        try (final PreparedStatement deleteAccessList = connection.prepareStatement(Statements.DELETE_ACCESS_LIST.get(configuration.type()).formatted(configuration.prefix()))) {
-            deleteAccessList.setString(1, accessList.getOwner().toString());
-            deleteAccessList.execute();
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
+    public void removeAccessList(final AccessList accessList) {
+        submitWrite(connection -> inTransaction(connection, () -> {
+            delete(connection, table("access_list_entries"), "owner_id", accessList.getOwner().toString());
+            delete(connection, table("access_lists"), "owner_id", accessList.getOwner().toString());
+        }));
     }
 
     @Override
     public long pendingSave() {
-        return CompletableFuture.supplyAsync(() -> saveBlocks.size() + removeBlocks.size() + saveEntities.size() + removeEntities.size(), executor).join();
+        return pending.get();
     }
 
     @Override
     public CompletableFuture<Void> flush() {
-        final CompletableFuture<Void> completionFuture = new CompletableFuture<>();
-        CompletableFuture.runAsync(() -> {
-            try {
-                if (!saveBlocks.isEmpty()) {
-                    connection.setAutoCommit(false);
-                    final Iterator<BlockProtection> saveBlocksIterator = saveBlocks.values().iterator();
-                    while (saveBlocksIterator.hasNext()) {
-                        saveBlockProtectionNow(saveBlocksIterator.next());
-                        saveBlocksIterator.remove();
-                    }
-                    connection.setAutoCommit(true);
-                }
-                if (!removeBlocks.isEmpty()) {
-                    connection.setAutoCommit(false);
-                    final Iterator<BlockProtection> removeBlocksIterator = removeBlocks.values().iterator();
-                    while (removeBlocksIterator.hasNext()) {
-                        removeBlockProtectionNow(removeBlocksIterator.next());
-                        removeBlocksIterator.remove();
-                    }
-                    connection.setAutoCommit(true);
-                }
-                if (!saveEntities.isEmpty()) {
-                    connection.setAutoCommit(false);
-                    final Iterator<EntityProtection> saveEntitiesIterator = saveEntities.values().iterator();
-                    while (saveEntitiesIterator.hasNext()) {
-                        saveEntityProtectionNow(saveEntitiesIterator.next());
-                        saveEntitiesIterator.remove();
-                    }
-                    connection.setAutoCommit(true);
-                }
-                if (!removeEntities.isEmpty()) {
-                    connection.setAutoCommit(false);
-                    final Iterator<EntityProtection> removeEntitiesIterator = removeEntities.values().iterator();
-                    while (removeEntitiesIterator.hasNext()) {
-                        removeEntityProtectionNow(removeEntitiesIterator.next());
-                        removeEntitiesIterator.remove();
-                    }
-                    connection.setAutoCommit(true);
-                }
-                if (!saveGroups.isEmpty()) {
-                    connection.setAutoCommit(false);
-                    final Iterator<Group> saveGroupsIterator = saveGroups.values().iterator();
-                    while (saveGroupsIterator.hasNext()) {
-                        saveGroupNow(saveGroupsIterator.next());
-                        saveGroupsIterator.remove();
-                    }
-                    connection.setAutoCommit(true);
-                }
-                if (!removeGroups.isEmpty()) {
-                    connection.setAutoCommit(false);
-                    final Iterator<Group> removeGroupsIterator = removeGroups.values().iterator();
-                    while (removeGroupsIterator.hasNext()) {
-                        removeGroupNow(removeGroupsIterator.next());
-                        removeGroupsIterator.remove();
-                    }
-                    connection.setAutoCommit(true);
-                }
-                if (!saveAccessLists.isEmpty()) {
-                    connection.setAutoCommit(false);
-                    final Iterator<AccessList> saveAccessListsIterator = saveAccessLists.values().iterator();
-                    while (saveAccessListsIterator.hasNext()) {
-                        saveAccessListNow(saveAccessListsIterator.next());
-                        saveAccessListsIterator.remove();
-                    }
-                    connection.setAutoCommit(true);
-                }
-                if (!removeAccessLists.isEmpty()) {
-                    connection.setAutoCommit(false);
-                    final Iterator<AccessList> removeAccessListsIterator = removeAccessLists.values().iterator();
-                    while (removeAccessListsIterator.hasNext()) {
-                        removeAccessListNow(removeAccessListsIterator.next());
-                        removeAccessListsIterator.remove();
-                    }
-                    connection.setAutoCommit(true);
-                }
-            } catch (SQLException e) {
-                e.printStackTrace();
-            } finally {
-                completionFuture.complete(null);
+        return CompletableFuture.runAsync(() -> {
+            // The single SQL executor is a barrier for all writes submitted before this no-op.
+        }, executor);
+    }
+
+    private void flushSafely() {
+        flush().whenComplete((ignored, exception) -> {
+            if (exception != null) {
+                LOGGER.log(Level.WARNING, "Scheduled Bolt SQL flush failed", exception);
+            }
+        });
+    }
+
+    public void close() {
+        flush().join();
+        scheduler.shutdownNow();
+        executor.shutdown();
+        dataSource.close();
+    }
+
+    private <T> CompletableFuture<T> submit(final SqlFunction<T> function) {
+        return CompletableFuture.supplyAsync(() -> {
+            try (Connection connection = dataSource.getConnection()) {
+                return function.apply(connection);
+            } catch (SQLException exception) {
+                throw new CompletionException(exception);
             }
         }, executor);
-        return completionFuture;
+    }
+
+    private CompletableFuture<Void> submitWrite(final SqlConsumer operation) {
+        pending.incrementAndGet();
+        return CompletableFuture.runAsync(() -> {
+            try (Connection connection = dataSource.getConnection()) {
+                operation.accept(connection);
+            } catch (SQLException exception) {
+                throw new CompletionException(exception);
+            }
+        }, executor).whenComplete((ignored, exception) -> {
+            pending.decrementAndGet();
+            if (exception != null) {
+                LOGGER.log(Level.SEVERE, "Bolt SQL write failed; protection state was not committed", exception);
+            }
+        });
+    }
+
+    private static void inTransaction(final Connection connection, final SqlRunnable operation) throws SQLException {
+        final boolean previousAutoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try {
+            operation.run();
+            connection.commit();
+        } catch (SQLException | RuntimeException exception) {
+            connection.rollback();
+            throw exception;
+        } finally {
+            connection.setAutoCommit(previousAutoCommit);
+        }
+    }
+
+    private static void delete(final Connection connection, final String table, final String column, final String value) throws SQLException {
+        final String sql = "DELETE FROM %s WHERE %s = ?".formatted(table, column);
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, value);
+            statement.executeUpdate();
+        }
+    }
+
+    @FunctionalInterface
+    private interface SqlFunction<T> {
+        T apply(Connection connection) throws SQLException;
+    }
+
+    @FunctionalInterface
+    private interface SqlConsumer {
+        void accept(Connection connection) throws SQLException;
+    }
+
+    @FunctionalInterface
+    private interface SqlRunnable {
+        void run() throws SQLException;
     }
 }

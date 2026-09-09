@@ -86,7 +86,8 @@ Platform adapter (Bukkit/Canvas/Folia)
 - `bolt_access_entries`：protection UUID、subject type、subject ID、action、effect、version。
 - `bolt_groups`：group ID/name/owner/version。
 - `bolt_group_members`：group ID、player UUID、role、version。
-- `bolt_access_lists`：owner UUID、全域 ACL action entries、version。
+- `bolt_access_lists`：owner UUID、全域 ACL version/update metadata。
+- `bolt_access_list_entries`：全域 ACL subject 与 access type 的 normalized entries。
 - `bolt_hopper_rules`：protection UUID、direction、match kind/value、effect、priority、quantity limit、version。
 - `bolt_audit_events`：actor/source、source type、action、target、world/position、item delta、metadata、created_at。
 - `bolt_outbox`：event UUID、event type、aggregate ID/version、payload、published/attempted timestamps。
