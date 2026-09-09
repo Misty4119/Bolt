@@ -15,6 +15,7 @@ dependencies {
     implementation("com.zaxxer:HikariCP:${project.property("hikariVersion")}")
     implementation("org.postgresql:postgresql:${project.property("postgresqlDriverVersion")}")
     implementation("com.mysql:mysql-connector-j:${project.property("mysqlDriverVersion")}")
+    implementation("org.xerial:sqlite-jdbc:${project.property("sqliteDriverVersion")}")
     implementation("io.lettuce:lettuce-core:${project.property("lettuceVersion")}")
     implementation(group = "net.kyori", name = "event-api", version = "3.0.0") {
         exclude(module = "guava")
