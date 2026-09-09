@@ -22,7 +22,7 @@ redis:
   enabled: false
   required: false
   uri: redis://127.0.0.1:6379
-  namespace: bolt:
+  namespace: "bolt:"
   network-id: default
   server-id: standalone
 protections:
