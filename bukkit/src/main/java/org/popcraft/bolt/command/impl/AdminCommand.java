@@ -26,7 +26,6 @@ public class AdminCommand extends BoltCommand {
         SUB_COMMANDS.clear();
         SUB_COMMANDS.putAll(Map.ofEntries(
                 Map.entry("cleanup", new AdminCleanup(plugin)),
-                Map.entry("convert", new AdminConvertCommand(plugin)),
                 Map.entry("debug", new AdminDebugCommand(plugin)),
                 Map.entry("expire", new AdminExpireCommand(plugin)),
                 Map.entry("find", new AdminFindCommand(plugin)),
@@ -35,7 +34,6 @@ public class AdminCommand extends BoltCommand {
                 Map.entry("purge", new AdminPurgeCommand(plugin)),
                 Map.entry("reload", new AdminReloadCommand(plugin)),
                 Map.entry("report", new AdminReportCommand(plugin)),
-                Map.entry("storage", new AdminStorageCommand(plugin)),
                 Map.entry("transfer", new AdminTransferCommand(plugin)),
                 Map.entry("trust", new AdminTrustCommand(plugin))
         ));

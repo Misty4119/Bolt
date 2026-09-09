@@ -50,8 +50,6 @@ import org.popcraft.bolt.data.ProfileCache;
 import org.popcraft.bolt.data.SQLStore;
 import org.popcraft.bolt.data.SimpleProfileCache;
 import org.popcraft.bolt.data.SimpleProtectionCache;
-import org.popcraft.bolt.data.migration.lwc.ConfigMigration;
-import org.popcraft.bolt.data.migration.lwc.TrustMigration;
 import org.popcraft.bolt.data.redis.RedisCache;
 import org.popcraft.bolt.event.Event;
 import org.popcraft.bolt.lang.Translation;
@@ -238,9 +236,6 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
         profileCache.load();
         final Metrics metrics = new Metrics(this, 17711);
         registerCustomCharts(metrics, databaseConfiguration);
-        new ConfigMigration(this).convert();
-        // Future: Move this into LWC Migration
-        new TrustMigration(this).convert();
         getServer().getServicesManager().register(BoltAPI.class, this, this, ServicePriority.Normal);
     }
 
