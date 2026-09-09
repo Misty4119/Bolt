@@ -1,0 +1,40 @@
+type: network
+version: "26.2"
+
+proxy:
+  software: velocity-ctd
+  version: latest
+  port: 25565
+  bind: 127.0.0.1
+
+backends:
+  - name: canvas-a
+    software: canvas
+    version: "26.2"
+    port: 25566
+    bind: 127.0.0.1
+    plugin:
+      jar: "C:/Users/margo/IdeaProjects/Bolt-master/bukkit/build/libs/Bolt-1.3.31.jar"
+      name: Bolt
+      config: "C:/Users/margo/IdeaProjects/Bolt-master/docs/plugdev-bolt-canvas-a.yml"
+  - name: canvas-b
+    software: canvas
+    version: "26.2"
+    port: 25567
+    bind: 127.0.0.1
+    plugin:
+      jar: "C:/Users/margo/IdeaProjects/Bolt-master/bukkit/build/libs/Bolt-1.3.31.jar"
+      name: Bolt
+      config: "C:/Users/margo/IdeaProjects/Bolt-master/docs/plugdev-bolt-canvas-b.yml"
+
+forwarding:
+  secret: bolt-plugdev-cross-server-test-secret
+  generate: false
+
+client:
+  joinOnReady: false
+
+rcon:
+  enabled: true
+  basePort: 35665
+  password: bolt-plugdev-rcon-test

@@ -1,0 +1,42 @@
+version: 0
+language: en
+settings:
+  use-action-bar: false
+  per-player-locale: false
+gui:
+  enabled: true
+  sneak-right-click-owner: true
+audit:
+  enabled: true
+  retention-days: 90
+  recent-per-block: 100
+database:
+  type: sqlite
+  path: "C:/Users/margo/IdeaProjects/plugdev-main/.plugdev/network/bolt-shared-v2.db"
+  prefix: ""
+  properties: { }
+redis:
+  enabled: true
+  required: true
+  uri: redis://127.0.0.1:6389
+  namespace: "bolt-e2e:"
+  network-id: bolt-e2e
+  server-id: canvas-a
+protections:
+  private:
+    default: true
+    require-permission: false
+    allows: [ "redstone" ]
+  public:
+    require-permission: false
+    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "hopper_insert", "hopper_extract", "mount" ]
+access:
+  normal:
+    default: true
+    require-permission: false
+    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "hopper_insert", "hopper_extract", "mount" ]
+blocks:
+  chest:
+    autoProtect: false
+  hopper:
+    autoProtect: false

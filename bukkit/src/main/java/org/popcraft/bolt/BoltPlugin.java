@@ -50,8 +50,7 @@ import org.popcraft.bolt.data.ProfileCache;
 import org.popcraft.bolt.data.SQLStore;
 import org.popcraft.bolt.data.SimpleProfileCache;
 import org.popcraft.bolt.data.SimpleProtectionCache;
-import org.popcraft.bolt.data.migration.lwc.ConfigMigration;
-import org.popcraft.bolt.data.migration.lwc.TrustMigration;
+import org.popcraft.bolt.data.redis.RedisCache;
 import org.popcraft.bolt.event.Event;
 import org.popcraft.bolt.lang.Translation;
 import org.popcraft.bolt.lang.Translator;
@@ -141,6 +140,7 @@ import org.popcraft.bolt.util.EnumUtil;
 import org.popcraft.bolt.util.Group;
 import org.popcraft.bolt.util.Mode;
 import org.popcraft.bolt.util.ProtectableConfig;
+import org.popcraft.bolt.util.ProtectionMenu;
 
 import java.io.File;
 import java.nio.file.Path;
@@ -199,15 +199,18 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
     private int doorsCloseAfter;
     private boolean doorsFixPlugins;
     private Bolt bolt;
+    private SQLStore sqlStore;
+    private RedisCache redisCache;
     private CallbackManager callbackManager;
     private EventBus<Event> eventBus;
+    private ProtectionMenu protectionMenu;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
         final SQLStore.Configuration databaseConfiguration = new SQLStore.Configuration(
                 getConfig().getString("database.type", "sqlite").toLowerCase(),
-                getConfig().getString("database.path", "%s/Bolt/bolt.db".formatted(getPluginsPath().toFile().getName())),
+                getConfig().getString("database.path", getDataPath().resolve("bolt.db").toString()),
                 getConfig().getString("database.hostname", ""),
                 getConfig().getString("database.database", ""),
                 getConfig().getString("database.username", ""),
@@ -218,7 +221,14 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
                         .stream()
                         .collect(Collectors.toMap(String::valueOf, key -> getConfig().getString("database.properties." + key, "")))
         );
-        this.bolt = new Bolt(new SimpleProtectionCache(new SQLStore(databaseConfiguration)));
+        this.sqlStore = new SQLStore(databaseConfiguration);
+        this.redisCache = createRedisCache();
+        this.bolt = new Bolt(new SimpleProtectionCache(
+                sqlStore,
+                redisCache,
+                getConfig().getString("redis.network-id", "default"),
+                getConfig().getString("redis.server-id", "standalone")
+        ));
         reload();
         BoltComponents.enable();
         registerEvents();
@@ -228,9 +238,6 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
         profileCache.load();
         final Metrics metrics = new Metrics(this, 17711);
         registerCustomCharts(metrics, databaseConfiguration);
-        new ConfigMigration(this).convert();
-        // Future: Move this into LWC Migration
-        new TrustMigration(this).convert();
         getServer().getServicesManager().register(BoltAPI.class, this, this, ServicePriority.Normal);
     }
 
@@ -241,7 +248,37 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
         commands.clear();
         getLogger().info(() -> "Flushing protection updates (%d)".formatted(bolt.getStore().pendingSave()));
         bolt.getStore().flush().join();
+        if (sqlStore != null) {
+            sqlStore.close();
+        }
+        if (redisCache != null) {
+            redisCache.close();
+        }
         getServer().getServicesManager().unregisterAll(this);
+    }
+
+    private RedisCache createRedisCache() {
+        if (!getConfig().getBoolean("redis.enabled", false)) {
+            return null;
+        }
+        final String uri = getConfig().getString("redis.uri", "redis://127.0.0.1:6379");
+        final String namespace = getConfig().getString("redis.namespace", "bolt:");
+        final boolean required = getConfig().getBoolean("redis.required", false);
+        try {
+            final RedisCache cache = new RedisCache(new RedisCache.Configuration(uri, namespace));
+            if (!cache.ping()) {
+                cache.close();
+                throw new IllegalStateException("Redis ping did not return PONG");
+            }
+            getLogger().info(() -> "Redis cache connected: " + namespace);
+            return cache;
+        } catch (RuntimeException exception) {
+            if (required) {
+                throw new IllegalStateException("Redis is required but unavailable", exception);
+            }
+            getLogger().log(java.util.logging.Level.WARNING, "Redis unavailable; continuing with SQL and L1 cache", exception);
+            return null;
+        }
     }
 
     public void reload() {
@@ -460,6 +497,8 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
 
     private void registerEvents() {
         final PluginManager pluginManager = getServer().getPluginManager();
+        this.protectionMenu = new ProtectionMenu(this);
+        pluginManager.registerEvents(protectionMenu, this);
         pluginManager.registerEvents(new BlockListener(this), this);
         final EntityListener entityListener = new EntityListener(this);
         pluginManager.registerEvents(entityListener, this);
@@ -702,6 +741,12 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
             bolt.getStore().removeBlockProtection(blockProtection);
         } else if (protection instanceof final EntityProtection entityProtection) {
             bolt.getStore().removeEntityProtection(entityProtection);
+        }
+    }
+
+    public void openProtectionMenu(final Player player, final Protection protection) {
+        if (protectionMenu != null) {
+            protectionMenu.open(player, protection);
         }
     }
 

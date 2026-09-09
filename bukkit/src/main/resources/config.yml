@@ -3,6 +3,13 @@ language: en
 settings:
   use-action-bar: false
   per-player-locale: true
+gui:
+  enabled: true
+  sneak-right-click-owner: true
+audit:
+  enabled: true
+  retention-days: 90
+  recent-per-block: 100
 database:
   type: sqlite
   hostname: ""
@@ -11,6 +18,13 @@ database:
   password: ""
   prefix: ""
   properties: [ ]
+redis:
+  enabled: false
+  required: false
+  uri: redis://127.0.0.1:6379
+  namespace: "bolt:"
+  network-id: default
+  server-id: standalone
 protections:
   private:
     default: true
@@ -21,21 +35,21 @@ protections:
     allows: [ "redstone", "interact", "open" ]
   deposit:
     require-permission: false
-    allows: [ "redstone", "interact", "open", "deposit" ]
+    allows: [ "redstone", "interact", "open", "deposit", "hopper_insert" ]
   withdrawal:
     require-permission: false
-    allows: [ "redstone", "interact", "open", "withdraw" ]
+    allows: [ "redstone", "interact", "open", "withdraw", "hopper_extract" ]
   public:
     require-permission: false
-    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "mount" ]
+    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "hopper_insert", "hopper_extract", "mount" ]
 access:
   normal:
     default: true
     require-permission: false
-    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "mount" ]
+    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "hopper_insert", "hopper_extract", "mount" ]
   admin:
     require-permission: true
-    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "mount", "edit" ]
+    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "hopper_insert", "hopper_extract", "mount", "edit" ]
 sources:
   player:
     require-permission: false
