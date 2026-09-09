@@ -140,6 +140,7 @@ import org.popcraft.bolt.util.EnumUtil;
 import org.popcraft.bolt.util.Group;
 import org.popcraft.bolt.util.Mode;
 import org.popcraft.bolt.util.ProtectableConfig;
+import org.popcraft.bolt.util.ProtectionMenu;
 
 import java.io.File;
 import java.nio.file.Path;
@@ -202,13 +203,14 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
     private RedisCache redisCache;
     private CallbackManager callbackManager;
     private EventBus<Event> eventBus;
+    private ProtectionMenu protectionMenu;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
         final SQLStore.Configuration databaseConfiguration = new SQLStore.Configuration(
                 getConfig().getString("database.type", "sqlite").toLowerCase(),
-                getConfig().getString("database.path", "%s/Bolt/bolt.db".formatted(getPluginsPath().toFile().getName())),
+                getConfig().getString("database.path", getDataPath().resolve("bolt.db").toString()),
                 getConfig().getString("database.hostname", ""),
                 getConfig().getString("database.database", ""),
                 getConfig().getString("database.username", ""),
@@ -495,6 +497,8 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
 
     private void registerEvents() {
         final PluginManager pluginManager = getServer().getPluginManager();
+        this.protectionMenu = new ProtectionMenu(this);
+        pluginManager.registerEvents(protectionMenu, this);
         pluginManager.registerEvents(new BlockListener(this), this);
         final EntityListener entityListener = new EntityListener(this);
         pluginManager.registerEvents(entityListener, this);
@@ -737,6 +741,12 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
             bolt.getStore().removeBlockProtection(blockProtection);
         } else if (protection instanceof final EntityProtection entityProtection) {
             bolt.getStore().removeEntityProtection(entityProtection);
+        }
+    }
+
+    public void openProtectionMenu(final Player player, final Protection protection) {
+        if (protectionMenu != null) {
+            protectionMenu.open(player, protection);
         }
     }
 

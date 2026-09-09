@@ -103,6 +103,15 @@ public final class BlockListener extends InteractionListener implements Listener
         // First interaction in this tick, to avoid some double actions when both hands are sent as events.
         final boolean firstInteraction = !boltPlayer.hasInteracted();
         final Protection protection = plugin.findProtection(clicked);
+        if (plugin.getConfig().getBoolean("gui.enabled", true) && plugin.getConfig().getBoolean("gui.sneak-right-click-owner", true)
+                && firstInteraction && player.isSneaking() && org.bukkit.event.block.Action.RIGHT_CLICK_BLOCK.equals(e.getAction())
+                && protection instanceof BlockProtection && player.getUniqueId().equals(protection.getOwner())) {
+            e.setCancelled(true);
+            plugin.openProtectionMenu(player, protection);
+            boltPlayer.setInteracted();
+            SchedulerUtil.schedule(plugin, player, boltPlayer::clearInteraction);
+            return;
+        }
         boolean shouldCancel = false;
         boolean interacted = false;
         if (firstInteraction && triggerAction(player, protection, clicked)) {
