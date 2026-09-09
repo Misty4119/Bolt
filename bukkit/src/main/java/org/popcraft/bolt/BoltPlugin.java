@@ -52,6 +52,7 @@ import org.popcraft.bolt.data.SimpleProfileCache;
 import org.popcraft.bolt.data.SimpleProtectionCache;
 import org.popcraft.bolt.data.migration.lwc.ConfigMigration;
 import org.popcraft.bolt.data.migration.lwc.TrustMigration;
+import org.popcraft.bolt.data.redis.RedisCache;
 import org.popcraft.bolt.event.Event;
 import org.popcraft.bolt.lang.Translation;
 import org.popcraft.bolt.lang.Translator;
@@ -199,6 +200,8 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
     private int doorsCloseAfter;
     private boolean doorsFixPlugins;
     private Bolt bolt;
+    private SQLStore sqlStore;
+    private RedisCache redisCache;
     private CallbackManager callbackManager;
     private EventBus<Event> eventBus;
 
@@ -218,7 +221,14 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
                         .stream()
                         .collect(Collectors.toMap(String::valueOf, key -> getConfig().getString("database.properties." + key, "")))
         );
-        this.bolt = new Bolt(new SimpleProtectionCache(new SQLStore(databaseConfiguration)));
+        this.sqlStore = new SQLStore(databaseConfiguration);
+        this.redisCache = createRedisCache();
+        this.bolt = new Bolt(new SimpleProtectionCache(
+                sqlStore,
+                redisCache,
+                getConfig().getString("redis.network-id", "default"),
+                getConfig().getString("redis.server-id", "standalone")
+        ));
         reload();
         BoltComponents.enable();
         registerEvents();
@@ -241,7 +251,37 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
         commands.clear();
         getLogger().info(() -> "Flushing protection updates (%d)".formatted(bolt.getStore().pendingSave()));
         bolt.getStore().flush().join();
+        if (sqlStore != null) {
+            sqlStore.close();
+        }
+        if (redisCache != null) {
+            redisCache.close();
+        }
         getServer().getServicesManager().unregisterAll(this);
+    }
+
+    private RedisCache createRedisCache() {
+        if (!getConfig().getBoolean("redis.enabled", false)) {
+            return null;
+        }
+        final String uri = getConfig().getString("redis.uri", "redis://127.0.0.1:6379");
+        final String namespace = getConfig().getString("redis.namespace", "bolt:");
+        final boolean required = getConfig().getBoolean("redis.required", false);
+        try {
+            final RedisCache cache = new RedisCache(new RedisCache.Configuration(uri, namespace));
+            if (!cache.ping()) {
+                cache.close();
+                throw new IllegalStateException("Redis ping did not return PONG");
+            }
+            getLogger().info(() -> "Redis cache connected: " + namespace);
+            return cache;
+        } catch (RuntimeException exception) {
+            if (required) {
+                throw new IllegalStateException("Redis is required but unavailable", exception);
+            }
+            getLogger().log(java.util.logging.Level.WARNING, "Redis unavailable; continuing with SQL and L1 cache", exception);
+            return null;
+        }
     }
 
     public void reload() {
