@@ -20,7 +20,7 @@ import java.time.Duration;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-public class SimpleProtectionCache implements Store {
+public class SimpleProtectionCache implements Store, VersionedStore, AuditStore {
     private static final Logger LOGGER = Logger.getLogger(SimpleProtectionCache.class.getName());
     private static final Duration REDIS_TTL = Duration.ofSeconds(30);
     private final Map<BlockLocation, UUID> cachedBlockLocationId = new ConcurrentHashMap<>();
@@ -29,6 +29,7 @@ public class SimpleProtectionCache implements Store {
     private final Map<UUID, EntityProtection> cachedEntities = new ConcurrentHashMap<>();
     private final Map<String, Group> cachedGroups = new ConcurrentHashMap<>();
     private final Map<UUID, AccessList> cachedAccessLists = new ConcurrentHashMap<>();
+    private final Map<String, Long> latestInvalidationVersions = new ConcurrentHashMap<>();
     private final Store backingStore;
     private final CacheTransport redis;
     private final ProtectionCacheCodec codec;
@@ -84,6 +85,18 @@ public class SimpleProtectionCache implements Store {
 
     @Override
     public void saveBlockProtection(BlockProtection protection) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            final BlockProtection previous = cachedBlocks.get(protection.getId());
+            cacheBlock(protection);
+            versionedStore.saveBlockProtectionVersioned(protection).whenComplete((version, exception) -> {
+                if (exception != null) {
+                    restoreBlock(previous, protection);
+                    return;
+                }
+                publishAndCacheBlock(protection, version);
+            });
+            return;
+        }
         cacheBlock(protection);
         backingStore.saveBlockProtection(protection);
         afterSqlCommit(() -> {
@@ -96,6 +109,20 @@ public class SimpleProtectionCache implements Store {
 
     @Override
     public void removeBlockProtection(BlockProtection protection) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            final BlockProtection previous = cachedBlocks.get(protection.getId());
+            removeCachedBlock(protection);
+            versionedStore.removeBlockProtectionVersioned(protection).whenComplete((removed, exception) -> {
+                if (exception != null || !Boolean.TRUE.equals(removed)) {
+                    restoreBlock(previous, protection);
+                    return;
+                }
+                invalidateRedisSafely(CacheKeys.block(BlockLocation.fromProtection(protection)));
+                invalidateRedisSafely(CacheKeys.block(protection.getId()));
+                publish(CacheInvalidationMessage.Operation.DELETE, "block", protection.getId().toString(), protection.getVersion());
+            });
+            return;
+        }
         final UUID id = protection.getId();
         final BlockLocation blockLocation = BlockLocation.fromProtection(protection);
         cachedBlockLocationId.remove(blockLocation);
@@ -123,6 +150,18 @@ public class SimpleProtectionCache implements Store {
 
     @Override
     public void saveEntityProtection(EntityProtection protection) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            final EntityProtection previous = cachedEntities.put(protection.getId(), protection);
+            versionedStore.saveEntityProtectionVersioned(protection).whenComplete((version, exception) -> {
+                if (exception != null) {
+                    restoreEntity(previous, protection);
+                    return;
+                }
+                putRedisSafely(CacheKeys.entity(protection.getId()), codec.encode(protection));
+                publish(CacheInvalidationMessage.Operation.UPSERT, "entity", protection.getId().toString(), version);
+            });
+            return;
+        }
         cachedEntities.put(protection.getId(), protection);
         backingStore.saveEntityProtection(protection);
         afterSqlCommit(() -> {
@@ -133,6 +172,18 @@ public class SimpleProtectionCache implements Store {
 
     @Override
     public void removeEntityProtection(EntityProtection protection) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            final EntityProtection previous = cachedEntities.remove(protection.getId());
+            versionedStore.removeEntityProtectionVersioned(protection).whenComplete((removed, exception) -> {
+                if (exception != null || !Boolean.TRUE.equals(removed)) {
+                    restoreEntity(previous, protection);
+                    return;
+                }
+                invalidateRedisSafely(CacheKeys.entity(protection.getId()));
+                publish(CacheInvalidationMessage.Operation.DELETE, "entity", protection.getId().toString(), protection.getVersion());
+            });
+            return;
+        }
         cachedEntities.remove(protection.getId());
         backingStore.removeEntityProtection(protection);
         afterSqlCommit(() -> {
@@ -153,6 +204,18 @@ public class SimpleProtectionCache implements Store {
 
     @Override
     public void saveGroup(Group group) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            final Group previous = cachedGroups.put(group.getName(), group);
+            versionedStore.saveGroupVersioned(group).whenComplete((version, exception) -> {
+                if (exception != null) {
+                    restoreGroup(previous, group);
+                    return;
+                }
+                putRedisSafely("group:" + group.getName(), codec.encode(group));
+                publish(CacheInvalidationMessage.Operation.UPSERT, "group", group.getName(), version);
+            });
+            return;
+        }
         cachedGroups.put(group.getName(), group);
         backingStore.saveGroup(group);
         afterSqlCommit(() -> {
@@ -163,6 +226,18 @@ public class SimpleProtectionCache implements Store {
 
     @Override
     public void removeGroup(Group group) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            final Group previous = cachedGroups.remove(group.getName());
+            versionedStore.removeGroupVersioned(group).whenComplete((removed, exception) -> {
+                if (exception != null || !Boolean.TRUE.equals(removed)) {
+                    restoreGroup(previous, group);
+                    return;
+                }
+                invalidateRedisSafely("group:" + group.getName());
+                publish(CacheInvalidationMessage.Operation.DELETE, "group", group.getName(), group.getVersion());
+            });
+            return;
+        }
         cachedGroups.remove(group.getName());
         backingStore.removeGroup(group);
         afterSqlCommit(() -> {
@@ -183,6 +258,18 @@ public class SimpleProtectionCache implements Store {
 
     @Override
     public void saveAccessList(AccessList accessList) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            final AccessList previous = cachedAccessLists.put(accessList.getOwner(), accessList);
+            versionedStore.saveAccessListVersioned(accessList).whenComplete((version, exception) -> {
+                if (exception != null) {
+                    restoreAccessList(previous, accessList);
+                    return;
+                }
+                putRedisSafely("access-list:" + accessList.getOwner(), codec.encode(accessList));
+                publish(CacheInvalidationMessage.Operation.UPSERT, "access-list", accessList.getOwner().toString(), version);
+            });
+            return;
+        }
         cachedAccessLists.put(accessList.getOwner(), accessList);
         backingStore.saveAccessList(accessList);
         afterSqlCommit(() -> {
@@ -193,6 +280,18 @@ public class SimpleProtectionCache implements Store {
 
     @Override
     public void removeAccessList(AccessList accessList) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            final AccessList previous = cachedAccessLists.remove(accessList.getOwner());
+            versionedStore.removeAccessListVersioned(accessList).whenComplete((removed, exception) -> {
+                if (exception != null || !Boolean.TRUE.equals(removed)) {
+                    restoreAccessList(previous, accessList);
+                    return;
+                }
+                invalidateRedisSafely("access-list:" + accessList.getOwner());
+                publish(CacheInvalidationMessage.Operation.DELETE, "access-list", accessList.getOwner().toString(), accessList.getVersion());
+            });
+            return;
+        }
         cachedAccessLists.remove(accessList.getOwner());
         backingStore.removeAccessList(accessList);
         afterSqlCommit(() -> {
@@ -204,6 +303,21 @@ public class SimpleProtectionCache implements Store {
     @Override
     public long pendingSave() {
         return backingStore.pendingSave();
+    }
+
+    @Override
+    public void appendAuditEvent(final AuditEvent event) {
+        if (backingStore instanceof AuditStore auditStore) {
+            auditStore.appendAuditEvent(event);
+        }
+    }
+
+    @Override
+    public CompletableFuture<Collection<AuditEvent>> loadRecentAuditEvents(final UUID protectionId, final int limit) {
+        if (backingStore instanceof AuditStore auditStore) {
+            return auditStore.loadRecentAuditEvents(protectionId, limit);
+        }
+        return CompletableFuture.completedFuture(java.util.List.of());
     }
 
     @Override
@@ -261,8 +375,12 @@ public class SimpleProtectionCache implements Store {
     }
 
     private void publish(final CacheInvalidationMessage.Operation operation, final String aggregateType, final String aggregateId) {
+        publish(operation, aggregateType, aggregateId, 1);
+    }
+
+    private void publish(final CacheInvalidationMessage.Operation operation, final String aggregateType, final String aggregateId, final long version) {
         if (redis != null) {
-            redis.publish(CacheKeys.invalidationChannel(), new CacheInvalidationMessage(networkId, serverId, aggregateType, aggregateId, 1, operation));
+            redis.publish(CacheKeys.invalidationChannel(), new CacheInvalidationMessage(networkId, serverId, aggregateType, aggregateId, version, operation));
         }
     }
 
@@ -270,6 +388,12 @@ public class SimpleProtectionCache implements Store {
         if (!networkId.equals(message.networkId()) || serverId.equals(message.serverId())) {
             return;
         }
+        final String versionKey = message.aggregateType() + ':' + message.aggregateId();
+        final long previousVersion = latestInvalidationVersions.getOrDefault(versionKey, -1L);
+        if (message.version() <= previousVersion) {
+            return;
+        }
+        latestInvalidationVersions.put(versionKey, message.version());
         try {
             switch (message.aggregateType()) {
                 case "block" -> invalidateBlock(UUID.fromString(message.aggregateId()), message.operation());
@@ -305,6 +429,126 @@ public class SimpleProtectionCache implements Store {
 
     private void invalidateEntity(final UUID id, final CacheInvalidationMessage.Operation operation) {
         cachedEntities.remove(id);
+    }
+
+    @Override
+    public CompletableFuture<Long> saveBlockProtectionVersioned(final BlockProtection protection) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            return versionedStore.saveBlockProtectionVersioned(protection);
+        }
+        saveBlockProtection(protection);
+        return CompletableFuture.completedFuture(protection.getVersion());
+    }
+
+    @Override
+    public CompletableFuture<Boolean> removeBlockProtectionVersioned(final BlockProtection protection) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            return versionedStore.removeBlockProtectionVersioned(protection);
+        }
+        removeBlockProtection(protection);
+        return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
+    public CompletableFuture<Long> saveEntityProtectionVersioned(final EntityProtection protection) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            return versionedStore.saveEntityProtectionVersioned(protection);
+        }
+        saveEntityProtection(protection);
+        return CompletableFuture.completedFuture(protection.getVersion());
+    }
+
+    @Override
+    public CompletableFuture<Boolean> removeEntityProtectionVersioned(final EntityProtection protection) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            return versionedStore.removeEntityProtectionVersioned(protection);
+        }
+        removeEntityProtection(protection);
+        return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
+    public CompletableFuture<Long> saveGroupVersioned(final Group group) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            return versionedStore.saveGroupVersioned(group);
+        }
+        saveGroup(group);
+        return CompletableFuture.completedFuture(group.getVersion());
+    }
+
+    @Override
+    public CompletableFuture<Boolean> removeGroupVersioned(final Group group) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            return versionedStore.removeGroupVersioned(group);
+        }
+        removeGroup(group);
+        return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
+    public CompletableFuture<Long> saveAccessListVersioned(final AccessList accessList) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            return versionedStore.saveAccessListVersioned(accessList);
+        }
+        saveAccessList(accessList);
+        return CompletableFuture.completedFuture(accessList.getVersion());
+    }
+
+    @Override
+    public CompletableFuture<Boolean> removeAccessListVersioned(final AccessList accessList) {
+        if (backingStore instanceof VersionedStore versionedStore) {
+            return versionedStore.removeAccessListVersioned(accessList);
+        }
+        removeAccessList(accessList);
+        return CompletableFuture.completedFuture(true);
+    }
+
+    private void publishAndCacheBlock(final BlockProtection protection, final long version) {
+        putRedisSafely(CacheKeys.block(BlockLocation.fromProtection(protection)), codec.encode(protection));
+        putRedisSafely(CacheKeys.block(protection.getId()), codec.encode(protection));
+        publish(CacheInvalidationMessage.Operation.UPSERT, "block", protection.getId().toString(), version);
+    }
+
+    private void removeCachedBlock(final BlockProtection protection) {
+        final UUID id = protection.getId();
+        final BlockLocation blockLocation = cachedBlockIdLocation.remove(id);
+        cachedBlocks.remove(id);
+        if (blockLocation != null) {
+            cachedBlockLocationId.remove(blockLocation);
+        } else {
+            cachedBlockLocationId.remove(BlockLocation.fromProtection(protection));
+        }
+    }
+
+    private void restoreBlock(final BlockProtection previous, final BlockProtection attempted) {
+        removeCachedBlock(attempted);
+        if (previous != null) {
+            cacheBlock(previous);
+        }
+    }
+
+    private void restoreEntity(final EntityProtection previous, final EntityProtection attempted) {
+        if (previous == null) {
+            cachedEntities.remove(attempted.getId());
+        } else {
+            cachedEntities.put(attempted.getId(), previous);
+        }
+    }
+
+    private void restoreGroup(final Group previous, final Group attempted) {
+        if (previous == null) {
+            cachedGroups.remove(attempted.getName());
+        } else {
+            cachedGroups.put(attempted.getName(), previous);
+        }
+    }
+
+    private void restoreAccessList(final AccessList previous, final AccessList attempted) {
+        if (previous == null) {
+            cachedAccessLists.remove(attempted.getOwner());
+        } else {
+            cachedAccessLists.put(attempted.getOwner(), previous);
+        }
     }
 
     private static String requireIdentifier(final String value, final String field) {

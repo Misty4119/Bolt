@@ -19,6 +19,9 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.popcraft.bolt.BoltPlugin;
+import org.popcraft.bolt.data.AuditEvent;
+import org.popcraft.bolt.data.AuditStore;
+import org.popcraft.bolt.protection.BlockProtection;
 import org.popcraft.bolt.protection.Protection;
 import org.popcraft.bolt.source.Source;
 import org.popcraft.bolt.source.SourceResolver;
@@ -26,6 +29,7 @@ import org.popcraft.bolt.source.SourceTypeResolver;
 import org.popcraft.bolt.source.SourceTypes;
 import org.popcraft.bolt.util.BoltPlayer;
 import org.popcraft.bolt.util.EnumUtil;
+import org.popcraft.bolt.util.InventoryTransportPolicy;
 import org.popcraft.bolt.util.Permission;
 
 public final class InventoryListener implements Listener {
@@ -151,14 +155,45 @@ public final class InventoryListener implements Listener {
             }
         }
         if (sourceProtection != null && destinationProtection != null) {
-            if (!plugin.canAccess(destinationProtection, sourceProtection.getOwner(), Permission.DEPOSIT) || !plugin.canAccess(sourceProtection, destinationProtection.getOwner(), Permission.WITHDRAW)) {
+            if (!plugin.canAccess(destinationProtection, sourceProtection.getOwner(), InventoryTransportPolicy.destinationPermission()) || !plugin.canAccess(sourceProtection, destinationProtection.getOwner(), InventoryTransportPolicy.sourcePermission())) {
                 e.setCancelled(true);
             }
-        } else if (sourceProtection != null && !plugin.canAccess(sourceProtection, BLOCK_SOURCE_RESOLVER, Permission.WITHDRAW)) {
+        } else if (sourceProtection != null && !plugin.canAccess(sourceProtection, BLOCK_SOURCE_RESOLVER, InventoryTransportPolicy.sourcePermission())) {
             e.setCancelled(true);
-        } else if (destinationProtection != null && !plugin.canAccess(destinationProtection, BLOCK_SOURCE_RESOLVER, Permission.DEPOSIT)) {
+        } else if (destinationProtection != null && !plugin.canAccess(destinationProtection, BLOCK_SOURCE_RESOLVER, InventoryTransportPolicy.destinationPermission())) {
             e.setCancelled(true);
         }
+        if (!e.isCancelled()) {
+            recordTransportAudit(e, sourceProtection, destinationProtection);
+        }
+    }
+
+    private void recordTransportAudit(final InventoryMoveItemEvent event, final Protection sourceProtection, final Protection destinationProtection) {
+        if (!(plugin.getBolt().getStore() instanceof AuditStore auditStore)) {
+            return;
+        }
+        final Protection target = destinationProtection != null ? destinationProtection : sourceProtection;
+        if (target == null) {
+            return;
+        }
+        final BlockProtection block = target instanceof BlockProtection blockProtection ? blockProtection : null;
+        final String action = destinationProtection != null ? Permission.HOPPER_INSERT : Permission.HOPPER_EXTRACT;
+        final ItemStack item = event.getItem();
+        auditStore.appendAuditEvent(new AuditEvent(
+                java.util.UUID.randomUUID(), null, "inventory_move", inventorySourceId(event.getSource()), action,
+                target.getId(), block == null ? null : block.getWorld(),
+                block == null ? null : block.getX(), block == null ? null : block.getY(), block == null ? null : block.getZ(),
+                item.getType().name(), item.getAmount(), null, System.currentTimeMillis()
+        ));
+    }
+
+    private static String inventorySourceId(final Inventory inventory) {
+        final InventoryHolder holder = inventory.getHolder(false);
+        if (holder instanceof BlockInventoryHolder blockHolder) {
+            final org.bukkit.block.Block block = blockHolder.getBlock();
+            return "%s:%d:%d:%d".formatted(block.getWorld().getName(), block.getX(), block.getY(), block.getZ());
+        }
+        return holder == null ? inventory.getType().name() : holder.getClass().getName();
     }
 
     @EventHandler

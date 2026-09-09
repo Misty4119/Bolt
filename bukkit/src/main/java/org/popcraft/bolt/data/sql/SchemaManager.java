@@ -11,6 +11,8 @@ import java.util.Arrays;
 import java.util.List;
 
 public final class SchemaManager {
+    public static final int CURRENT_SCHEMA_VERSION = 1;
+
     private SchemaManager() {
     }
 
@@ -40,6 +42,12 @@ public final class SchemaManager {
         try (Statement statement = connection.createStatement()) {
             for (final String sql : statements(type, prefix)) {
                 statement.execute(sql);
+            }
+            final String versionTable = SqlDialect.forType(type).quoteIdentifier(prefix + "bolt_schema_version");
+            try (var result = statement.executeQuery("SELECT version FROM " + versionTable + " ORDER BY version DESC")) {
+                if (!result.next()) {
+                    statement.executeUpdate("INSERT INTO " + versionTable + " (version, installed_at) VALUES (" + CURRENT_SCHEMA_VERSION + ", " + System.currentTimeMillis() + ")");
+                }
             }
         }
     }

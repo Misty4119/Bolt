@@ -18,7 +18,11 @@ public final class BoltComponents {
     }
 
     public static void enable() {
-        miniMessage = MiniMessage.miniMessage();
+        // Keep the complete Adventure standard tag set. Plugin placeholders are
+        // supplied per message and are not persisted as serialized components.
+        miniMessage = MiniMessage.builder()
+                .tags(TagResolver.standard())
+                .build();
     }
 
     public static void disable() {
