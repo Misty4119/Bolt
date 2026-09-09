@@ -70,9 +70,11 @@ import org.popcraft.bolt.util.Permission;
 import org.popcraft.bolt.util.Profiles;
 import org.popcraft.bolt.util.ProtectableConfig;
 import org.popcraft.bolt.util.Protections;
+import org.popcraft.bolt.util.PortalProtectionPolicy;
 import org.popcraft.bolt.util.SchedulerUtil;
 
 import java.util.List;
+import java.util.HashSet;
 import java.util.Set;
 
 import static org.popcraft.bolt.util.BoltComponents.translateRaw;
@@ -101,6 +103,15 @@ public final class BlockListener extends InteractionListener implements Listener
         // First interaction in this tick, to avoid some double actions when both hands are sent as events.
         final boolean firstInteraction = !boltPlayer.hasInteracted();
         final Protection protection = plugin.findProtection(clicked);
+        if (plugin.getConfig().getBoolean("gui.enabled", true) && plugin.getConfig().getBoolean("gui.sneak-right-click-owner", true)
+                && firstInteraction && player.isSneaking() && org.bukkit.event.block.Action.RIGHT_CLICK_BLOCK.equals(e.getAction())
+                && protection instanceof BlockProtection && player.getUniqueId().equals(protection.getOwner())) {
+            e.setCancelled(true);
+            plugin.openProtectionMenu(player, protection);
+            boltPlayer.setInteracted();
+            SchedulerUtil.schedule(plugin, player, boltPlayer::clearInteraction);
+            return;
+        }
         boolean shouldCancel = false;
         boolean interacted = false;
         if (firstInteraction && triggerAction(player, protection, clicked)) {
@@ -463,11 +474,19 @@ public final class BlockListener extends InteractionListener implements Listener
     @EventHandler
     public void onBlockIgnite(final BlockIgniteEvent e) {
         final Protection protection = plugin.findProtection(e.getBlock());
-        if (protection == null) {
+        if (protection != null) {
+            final Player player = e.getPlayer();
+            if (player == null || !plugin.canAccess(protection, player, Permission.INTERACT)) {
+                e.setCancelled(true);
+                return;
+            }
+        }
+        final BlockIgniteEvent.IgniteCause cause = e.getCause();
+        if (!BlockIgniteEvent.IgniteCause.FLINT_AND_STEEL.equals(cause)
+                && !BlockIgniteEvent.IgniteCause.FIREBALL.equals(cause)) {
             return;
         }
-        final Player player = e.getPlayer();
-        if (player == null || !plugin.canAccess(protection, player, Permission.INTERACT)) {
+        if (hasProtectedNetherPortalFrame(e.getBlock())) {
             e.setCancelled(true);
         }
     }
@@ -663,12 +682,74 @@ public final class BlockListener extends InteractionListener implements Listener
         }
     }
 
-    @EventHandler
-    public void onPortalCreate(final PortalCreateEvent e) {
-        for (final BlockState newBlock : e.getBlocks()) {
-            if (plugin.isProtected(newBlock.getBlock())) {
-                e.setCancelled(true);
+    private boolean hasProtectedNetherPortalFrame(final Block ignitionBlock) {
+        final int radius = 24;
+        for (int offsetX = -radius; offsetX <= radius; offsetX++) {
+            for (int offsetY = -radius; offsetY <= radius; offsetY++) {
+                final Block xPlane = ignitionBlock.getWorld().getBlockAt(
+                        ignitionBlock.getX() + offsetX,
+                        ignitionBlock.getY() + offsetY,
+                        ignitionBlock.getZ()
+                );
+                if (xPlane.getType() == Material.OBSIDIAN && plugin.isProtected(xPlane)) {
+                    return true;
+                }
+                final Block zPlane = ignitionBlock.getWorld().getBlockAt(
+                        ignitionBlock.getX(),
+                        ignitionBlock.getY() + offsetY,
+                        ignitionBlock.getZ() + offsetX
+                );
+                if (zPlane.getType() == Material.OBSIDIAN && plugin.isProtected(zPlane)) {
+                    return true;
+                }
             }
         }
+        return false;
+    }
+
+    @EventHandler
+    public void onPortalCreate(final PortalCreateEvent e) {
+        final Set<Block> candidates = new HashSet<>();
+        e.getBlocks().forEach(blockState -> candidates.add(blockState.getBlock()));
+        candidates.addAll(findNetherPortalFrameCandidates(e.getBlocks()));
+        if (PortalProtectionPolicy.shouldCancel(candidates, plugin::isProtected)) {
+            e.setCancelled(true);
+        }
+    }
+
+    private Set<Block> findNetherPortalFrameCandidates(final List<BlockState> portalBlocks) {
+        if (portalBlocks.stream().noneMatch(state -> Material.NETHER_PORTAL.equals(state.getType()))) {
+            return Set.of();
+        }
+        final Set<Block> candidates = new HashSet<>();
+        final int minX = portalBlocks.stream().mapToInt(state -> state.getBlock().getX()).min().orElseThrow();
+        final int maxX = portalBlocks.stream().mapToInt(state -> state.getBlock().getX()).max().orElseThrow();
+        final int minY = portalBlocks.stream().mapToInt(state -> state.getBlock().getY()).min().orElseThrow();
+        final int maxY = portalBlocks.stream().mapToInt(state -> state.getBlock().getY()).max().orElseThrow();
+        final Set<Integer> xValues = portalBlocks.stream().map(state -> state.getBlock().getX()).collect(java.util.stream.Collectors.toSet());
+        final Set<Integer> zValues = portalBlocks.stream().map(state -> state.getBlock().getZ()).collect(java.util.stream.Collectors.toSet());
+        if (zValues.size() == 1) {
+            final Block sample = portalBlocks.getFirst().getBlock();
+            for (int x = minX - 1; x <= maxX + 1; x++) {
+                for (int y = minY - 1; y <= maxY + 1; y++) {
+                    if (x == minX - 1 || x == maxX + 1 || y == minY - 1 || y == maxY + 1) {
+                        candidates.add(sample.getWorld().getBlockAt(x, y, sample.getZ()));
+                    }
+                }
+            }
+        } else if (xValues.size() == 1) {
+            final Block sample = portalBlocks.getFirst().getBlock();
+            for (int z = portalBlocks.stream().mapToInt(state -> state.getBlock().getZ()).min().orElseThrow() - 1;
+                 z <= portalBlocks.stream().mapToInt(state -> state.getBlock().getZ()).max().orElseThrow() + 1; z++) {
+                for (int y = minY - 1; y <= maxY + 1; y++) {
+                    if (z == zValues.stream().mapToInt(Integer::intValue).min().orElseThrow() - 1
+                            || z == zValues.stream().mapToInt(Integer::intValue).max().orElseThrow() + 1
+                            || y == minY - 1 || y == maxY + 1) {
+                        candidates.add(sample.getWorld().getBlockAt(sample.getX(), y, z));
+                    }
+                }
+            }
+        }
+        return candidates;
     }
 }
