@@ -3,6 +3,41 @@ language: en
 settings:
   use-action-bar: false
   per-player-locale: true
+messages:
+  palette: light
+  colors:
+    light:
+      # Sky blue -> soft lavender
+      surface: "#121520"
+      surface-alt: "#1E2030"
+      primary: "#9CC3FF"
+      info: "#6FA8FF"
+      accent: "#D9B3FF"
+      accent-soft: "#B89BE8"
+      muted: "#8C8FA3"
+      text: "#D6DAEA"
+      neon-primary: "#4A8CFF"
+      glow-primary: "#709FFF"
+      neon-accent: "#A078E6"
+      glow-accent: "#C58FFF"
+      night-text: "#E6EAFA"
+      quiet: "#8D93AB"
+    dark:
+      # Deep slate -> luminous lavender
+      surface: "#121520"
+      surface-alt: "#1E2030"
+      primary: "#4A8CFF"
+      info: "#709FFF"
+      accent: "#A078E6"
+      accent-soft: "#C58FFF"
+      muted: "#8D93AB"
+      text: "#E6EAFA"
+      neon-primary: "#4A8CFF"
+      glow-primary: "#709FFF"
+      neon-accent: "#A078E6"
+      glow-accent: "#C58FFF"
+      night-text: "#E6EAFA"
+      quiet: "#8D93AB"
 gui:
   enabled: true
   sneak-right-click-owner: true
@@ -21,10 +56,22 @@ database:
 redis:
   enabled: false
   required: false
+  # For a shared network use a Redis Sentinel URI, for example:
+  # redis-sentinel://sentinel-a:26379,sentinel-b:26379?sentinelMasterId=bolt-master
+  # Sentinel mode uses MasterReplica for cache reads/writes and reconnects
+  # invalidation Pub/Sub against the current elected master.
   uri: redis://127.0.0.1:6379
   namespace: "bolt:"
   network-id: default
   server-id: standalone
+  server-group: default
+outbox:
+  enabled: true
+  interval-ms: 1000
+  batch-size: 100
+  max-attempts: 8
+  lease-ms: 15000
+  retry-base-ms: 500
 protections:
   private:
     default: true

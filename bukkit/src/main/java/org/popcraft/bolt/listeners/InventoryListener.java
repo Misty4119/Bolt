@@ -21,6 +21,7 @@ import org.bukkit.inventory.ItemStack;
 import org.popcraft.bolt.BoltPlugin;
 import org.popcraft.bolt.data.AuditEvent;
 import org.popcraft.bolt.data.AuditStore;
+import org.popcraft.bolt.data.SensitiveOperation;
 import org.popcraft.bolt.protection.BlockProtection;
 import org.popcraft.bolt.protection.Protection;
 import org.popcraft.bolt.source.Source;
@@ -142,6 +143,13 @@ public final class InventoryListener implements Listener {
 
     @EventHandler
     public void onInventoryMoveItem(final InventoryMoveItemEvent e) {
+        // Automated transfers have no player source to re-check later. In a
+        // strict multi-server deployment, a lost cache/notification path must
+        // therefore fail closed before the transfer is allowed to happen.
+        if (!plugin.allowsSensitiveOperation(SensitiveOperation.HOPPER)) {
+            e.setCancelled(true);
+            return;
+        }
         final Protection sourceProtection = getInventoryProtection(e.getSource());
         final Protection destinationProtection = getInventoryProtection(e.getDestination());
         if (sourceProtection == null && destinationProtection == null) {

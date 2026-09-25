@@ -8,4 +8,8 @@ public interface AuditStore {
     void appendAuditEvent(AuditEvent event);
 
     CompletableFuture<Collection<AuditEvent>> loadRecentAuditEvents(UUID protectionId, int limit);
+
+    default CompletableFuture<Long> purgeAuditEventsBefore(final long cutoffMillis) {
+        return CompletableFuture.completedFuture(0L);
+    }
 }

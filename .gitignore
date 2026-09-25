@@ -116,3 +116,82 @@ run/
 
 # Avoid ignoring Gradle wrapper jar file (.jar files are usually ignored)
 !gradle-wrapper.jar
+
+
+# Local secrets, runtime data, and generated test output
+.env
+.env.*
+!.env.example
+!.env.template
+**/secrets.yml
+**/secrets.yaml
+**/config.local.yml
+**/config.local.yaml
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+/test-data-local/
+/test-results/
+/test-server/
+
+
+# Build and runtime output
+.gradle/
+**/build/
+target/
+bin/
+out/
+logs/
+run/
+runs/
+
+common/bin/
+.vscode/
+
+/.plugdev/
+# Local diagnostics and classpath captures can contain machine-specific or process data
+*.hprof
+*.heapdump
+*.dump
+*.dumpstream
+*.sql.gz
+*.backup
+*.bak
+hs_err_pid*
+replay_pid*
+/cp.txt
+/cp_full.txt
+/classpath.txt
+
+# Local crash reports can contain machine and runtime details
+crash-reports/
+
+# Internal implementation roadmap; keep local
+/docs/HARDENING_PLAN.md
+
+
+# Local-only test, internal, and private data
+**/test-data-local/
+**/test-results-local/
+**/test-server-local/
+**/internal-data-local/
+**/private-data-local/
+**/internal-notes-local/
+**/private-notes-local/
+*.internal.local
+*.private.local
+
+# Local-only engineering roadmap and validation records
+/docs/IMPLEMENTATION_PLAN.md
+/docs/VALIDATION.md
+/docs/plugdev-bolt-*.yml

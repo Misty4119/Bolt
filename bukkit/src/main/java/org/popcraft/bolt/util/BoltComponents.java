@@ -5,6 +5,7 @@ import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.Player;
 
 import java.util.Locale;
@@ -13,20 +14,36 @@ import static org.popcraft.bolt.lang.Translator.translate;
 
 public final class BoltComponents {
     private static MiniMessage miniMessage;
+    private static MessagePalette messagePalette;
 
     private BoltComponents() {
     }
 
     public static void enable() {
-        // Keep the complete Adventure standard tag set. Plugin placeholders are
-        // supplied per message and are not persisted as serialized components.
+        enable(null);
+    }
+
+    public static void enable(final ConfigurationSection messages) {
+        final String mode = messages == null ? "light" : messages.getString("palette", "light");
+        final ConfigurationSection colors = messages == null
+                ? null
+                : messages.getConfigurationSection("colors." + mode);
+        final java.util.Map<String, String> overrides = new java.util.HashMap<>();
+        if (colors != null) {
+            colors.getKeys(false).forEach(key -> overrides.put(key, colors.getString(key)));
+        }
+        // The custom resolver is layered before TagResolver.standard(), so the
+        // legacy names used by translations receive the configured palette while
+        // all standard MiniMessage tags remain available.
+        messagePalette = MessagePalette.from(mode, overrides);
         miniMessage = MiniMessage.builder()
-                .tags(TagResolver.standard())
+                .tags(messagePalette.resolver())
                 .build();
     }
 
     public static void disable() {
         miniMessage = null;
+        messagePalette = null;
     }
 
     private static void sendMessage(final CommandSender sender, final Component component) {
@@ -52,7 +69,9 @@ public final class BoltComponents {
     }
 
     public static Component resolveTranslation(final String key, final CommandSender sender, TagResolver... placeholders) {
-        return miniMessage.deserialize(translateRaw(key, sender), placeholders);
+        // Give unstyled translations a readable baseline while allowing nested
+        // semantic/legacy colour tags to override it.
+        return miniMessage.deserialize("<bolt-text>" + messagePalette.applyLegacyTags(translateRaw(key, sender)) + "</bolt-text>", placeholders);
     }
 
     /**

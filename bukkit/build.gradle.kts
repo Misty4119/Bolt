@@ -11,7 +11,7 @@ repositories {
 }
 
 dependencies {
-    compileOnly(group = "io.canvasmc.canvas", name = "canvas-api", version = "26.2.build.923-stable")
+    compileOnly(group = "io.canvasmc.canvas", name = "canvas-api", version = "26.2.build.941-stable")
     implementation("com.zaxxer:HikariCP:${project.property("hikariVersion")}")
     implementation("com.google.code.gson:gson:${project.property("gsonVersion")}")
     implementation("org.postgresql:postgresql:${project.property("postgresqlDriverVersion")}")
@@ -26,7 +26,9 @@ dependencies {
     implementation(group = "org.popcraft", name = "chunky-nbt", version = "1.3.127")
     api(project(":bolt-common"))
     implementation(project(":bolt-folia"))
+    testImplementation("net.kyori:adventure-text-minimessage:4.24.0")
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.10.2")
 }
 
 tasks {
@@ -38,10 +40,10 @@ tasks {
 tasks {
     processResources {
         inputs.property("version", project.version)
-        val name = project.property("artifactName")
+        val name = project.property("artifactName").toString()
         val version = project.version
         val group = project.group
-        val description = project.property("description")
+        val description = project.property("description").toString()
         filesMatching("plugin.yml") {
             expand(
                 "name" to name,

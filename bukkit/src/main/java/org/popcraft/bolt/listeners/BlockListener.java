@@ -52,6 +52,7 @@ import org.bukkit.event.world.StructureGrowEvent;
 import org.bukkit.util.Vector;
 import org.popcraft.bolt.BoltPlugin;
 import org.popcraft.bolt.access.Access;
+import org.popcraft.bolt.data.SensitiveOperation;
 import org.popcraft.bolt.event.LockBlockEvent;
 import org.popcraft.bolt.lang.Translation;
 import org.popcraft.bolt.listeners.adapter.ConnectedShelves;
@@ -70,7 +71,6 @@ import org.popcraft.bolt.util.Permission;
 import org.popcraft.bolt.util.Profiles;
 import org.popcraft.bolt.util.ProtectableConfig;
 import org.popcraft.bolt.util.Protections;
-import org.popcraft.bolt.util.PortalProtectionPolicy;
 import org.popcraft.bolt.util.SchedulerUtil;
 
 import java.util.List;
@@ -473,20 +473,30 @@ public final class BlockListener extends InteractionListener implements Listener
 
     @EventHandler
     public void onBlockIgnite(final BlockIgniteEvent e) {
-        final Protection protection = plugin.findProtection(e.getBlock());
-        if (protection != null) {
-            final Player player = e.getPlayer();
-            if (player == null || !plugin.canAccess(protection, player, Permission.INTERACT)) {
+        try {
+            final Protection protection = plugin.findProtection(e.getBlock());
+            if (protection != null) {
+                final Player player = e.getPlayer();
+                if (player == null || !plugin.canAccess(protection, player, Permission.INTERACT)) {
+                    e.setCancelled(true);
+                    return;
+                }
+            }
+            final BlockIgniteEvent.IgniteCause cause = e.getCause();
+            if (!BlockIgniteEvent.IgniteCause.FLINT_AND_STEEL.equals(cause)
+                    && !BlockIgniteEvent.IgniteCause.FIREBALL.equals(cause)) {
+                return;
+            }
+            if (!plugin.allowsSensitiveOperation(SensitiveOperation.PORTAL)) {
                 e.setCancelled(true);
                 return;
             }
-        }
-        final BlockIgniteEvent.IgniteCause cause = e.getCause();
-        if (!BlockIgniteEvent.IgniteCause.FLINT_AND_STEEL.equals(cause)
-                && !BlockIgniteEvent.IgniteCause.FIREBALL.equals(cause)) {
-            return;
-        }
-        if (hasProtectedNetherPortalFrame(e.getBlock())) {
+            if (hasProtectedNetherPortalFrame(e.getBlock())) {
+                e.setCancelled(true);
+            }
+        } catch (RuntimeException exception) {
+            plugin.getLogger().log(java.util.logging.Level.WARNING,
+                    "Unable to verify protected portal ignition; cancelling conservatively", exception);
             e.setCancelled(true);
         }
     }
@@ -683,7 +693,11 @@ public final class BlockListener extends InteractionListener implements Listener
     }
 
     private boolean hasProtectedNetherPortalFrame(final Block ignitionBlock) {
-        final int radius = 24;
+        // A legal Nether portal frame is at most 23 blocks wide/high. Keep
+        // this scan bounded so a malformed event cannot turn into an
+        // unbounded world search.
+        final int radius = 23;
+        final Set<Block> candidates = new HashSet<>();
         for (int offsetX = -radius; offsetX <= radius; offsetX++) {
             for (int offsetY = -radius; offsetY <= radius; offsetY++) {
                 final Block xPlane = ignitionBlock.getWorld().getBlockAt(
@@ -691,28 +705,41 @@ public final class BlockListener extends InteractionListener implements Listener
                         ignitionBlock.getY() + offsetY,
                         ignitionBlock.getZ()
                 );
-                if (xPlane.getType() == Material.OBSIDIAN && plugin.isProtected(xPlane)) {
-                    return true;
+                if (xPlane.getType() == Material.OBSIDIAN) {
+                    candidates.add(xPlane);
                 }
                 final Block zPlane = ignitionBlock.getWorld().getBlockAt(
                         ignitionBlock.getX(),
                         ignitionBlock.getY() + offsetY,
                         ignitionBlock.getZ() + offsetX
                 );
-                if (zPlane.getType() == Material.OBSIDIAN && plugin.isProtected(zPlane)) {
-                    return true;
+                if (zPlane.getType() == Material.OBSIDIAN) {
+                    candidates.add(zPlane);
                 }
             }
         }
-        return false;
+        return plugin.hasProtectedBlocks(candidates);
     }
 
     @EventHandler
     public void onPortalCreate(final PortalCreateEvent e) {
-        final Set<Block> candidates = new HashSet<>();
-        e.getBlocks().forEach(blockState -> candidates.add(blockState.getBlock()));
-        candidates.addAll(findNetherPortalFrameCandidates(e.getBlocks()));
-        if (PortalProtectionPolicy.shouldCancel(candidates, plugin::isProtected)) {
+        if (!plugin.allowsSensitiveOperation(SensitiveOperation.PORTAL)) {
+            e.setCancelled(true);
+            return;
+        }
+        try {
+            final Set<Block> candidates = new HashSet<>();
+            e.getBlocks().forEach(blockState -> candidates.add(blockState.getBlock()));
+            candidates.addAll(findNetherPortalFrameCandidates(e.getBlocks()));
+            // PortalCreate candidates are exact frame/portal blocks. Use the
+            // bounded bulk seam so strict multi-server mode does not perform
+            // one SQL read for every candidate.
+            if (plugin.hasProtectedBlocks(candidates)) {
+                e.setCancelled(true);
+            }
+        } catch (RuntimeException exception) {
+            plugin.getLogger().log(java.util.logging.Level.WARNING,
+                    "Unable to verify protected portal creation; cancelling conservatively", exception);
             e.setCancelled(true);
         }
     }

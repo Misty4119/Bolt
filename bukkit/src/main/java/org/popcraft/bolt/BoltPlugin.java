@@ -21,6 +21,8 @@ import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.event.HandlerList;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
 import org.bukkit.plugin.PluginManager;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -37,6 +39,7 @@ import org.popcraft.bolt.command.impl.AdminCommand;
 import org.popcraft.bolt.command.impl.CallbackCommand;
 import org.popcraft.bolt.command.impl.EditCommand;
 import org.popcraft.bolt.command.impl.GroupCommand;
+import org.popcraft.bolt.command.impl.HealthCommand;
 import org.popcraft.bolt.command.impl.HelpCommand;
 import org.popcraft.bolt.command.impl.InfoCommand;
 import org.popcraft.bolt.command.impl.LockCommand;
@@ -47,9 +50,17 @@ import org.popcraft.bolt.command.impl.TransferCommand;
 import org.popcraft.bolt.command.impl.TrustCommand;
 import org.popcraft.bolt.command.impl.UnlockCommand;
 import org.popcraft.bolt.data.ProfileCache;
+import org.popcraft.bolt.data.BulkBlockLookupStore;
+import org.popcraft.bolt.data.ConsistencyAwareStore;
+import org.popcraft.bolt.data.ConsistencyHealth;
+import org.popcraft.bolt.data.OutboxDispatcher;
+import org.popcraft.bolt.data.OutboxStore;
 import org.popcraft.bolt.data.SQLStore;
 import org.popcraft.bolt.data.SimpleProfileCache;
 import org.popcraft.bolt.data.SimpleProtectionCache;
+import org.popcraft.bolt.data.SensitiveOperation;
+import org.popcraft.bolt.data.WorldIdentity;
+import org.popcraft.bolt.data.WorldRegistryStore;
 import org.popcraft.bolt.data.redis.RedisCache;
 import org.popcraft.bolt.event.Event;
 import org.popcraft.bolt.lang.Translation;
@@ -200,7 +211,9 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
     private boolean doorsFixPlugins;
     private Bolt bolt;
     private SQLStore sqlStore;
+    private SimpleProtectionCache protectionCache;
     private RedisCache redisCache;
+    private OutboxDispatcher outboxDispatcher;
     private CallbackManager callbackManager;
     private EventBus<Event> eventBus;
     private ProtectionMenu protectionMenu;
@@ -223,14 +236,18 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
         );
         this.sqlStore = new SQLStore(databaseConfiguration);
         this.redisCache = createRedisCache();
-        this.bolt = new Bolt(new SimpleProtectionCache(
+        this.protectionCache = new SimpleProtectionCache(
                 sqlStore,
                 redisCache,
                 getConfig().getString("redis.network-id", "default"),
                 getConfig().getString("redis.server-id", "standalone")
-        ));
+        );
+        registerLoadedWorlds();
+        this.outboxDispatcher = createOutboxDispatcher();
+        this.bolt = new Bolt(protectionCache);
         reload();
-        BoltComponents.enable();
+        BoltComponents.enable(getConfig().getConfigurationSection("messages"));
+        scheduleAuditRetention();
         registerEvents();
         registerCommands();
         this.callbackManager = new CallbackManager(this);
@@ -245,9 +262,17 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
     public void onDisable() {
         BoltComponents.disable();
         HandlerList.unregisterAll(this);
+        if (outboxDispatcher != null) {
+            outboxDispatcher.close();
+        }
         commands.clear();
-        getLogger().info(() -> "Flushing protection updates (%d)".formatted(bolt.getStore().pendingSave()));
-        bolt.getStore().flush().join();
+        if (bolt != null) {
+            getLogger().info(() -> "Flushing protection updates (%d)".formatted(bolt.getStore().pendingSave()));
+            bolt.getStore().flush().join();
+        }
+        if (protectionCache != null) {
+            protectionCache.close();
+        }
         if (sqlStore != null) {
             sqlStore.close();
         }
@@ -258,12 +283,22 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
     }
 
     private RedisCache createRedisCache() {
-        if (!getConfig().getBoolean("redis.enabled", false)) {
+        final boolean enabled = getConfig().getBoolean("redis.enabled", false);
+        final String networkId = getConfig().getString("redis.network-id", "default");
+        final String serverId = getConfig().getString("redis.server-id", "standalone");
+        final boolean networked = !"default".equals(networkId) || !"standalone".equals(serverId);
+        if (!enabled) {
+            if (networked) {
+                throw new IllegalStateException("Redis must be enabled when redis.network-id/server-id configure a shared network");
+            }
             return null;
         }
         final String uri = getConfig().getString("redis.uri", "redis://127.0.0.1:6379");
         final String namespace = getConfig().getString("redis.namespace", "bolt:");
-        final boolean required = getConfig().getBoolean("redis.required", false);
+        final boolean required = getConfig().getBoolean("redis.required", false) || networked;
+        if (networked && !RedisCache.isSentinelUri(uri)) {
+            throw new IllegalStateException("Shared Redis requires a redis-sentinel:// or rediss-sentinel:// URI");
+        }
         try {
             final RedisCache cache = new RedisCache(new RedisCache.Configuration(uri, namespace));
             if (!cache.ping()) {
@@ -279,6 +314,64 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
             getLogger().log(java.util.logging.Level.WARNING, "Redis unavailable; continuing with SQL and L1 cache", exception);
             return null;
         }
+    }
+
+    private OutboxDispatcher createOutboxDispatcher() {
+        if (redisCache == null || !getConfig().getBoolean("outbox.enabled", true)) {
+            return null;
+        }
+        final int batchSize = Math.max(1, Math.min(2_000, getConfig().getInt("outbox.batch-size", 100)));
+        final int maxAttempts = Math.max(1, getConfig().getInt("outbox.max-attempts", 8));
+        final long leaseMillis = Math.max(1_000L, getConfig().getLong("outbox.lease-ms", 15_000L));
+        final long retryBaseMillis = Math.max(100L, getConfig().getLong("outbox.retry-base-ms", 500L));
+        final long intervalMillis = Math.max(100L, getConfig().getLong("outbox.interval-ms", 1_000L));
+        final String serverId = getConfig().getString("redis.server-id", "standalone");
+        final String workerId = (serverId + "-" + java.util.UUID.randomUUID()).substring(0,
+                Math.min(128, serverId.length() + 1 + 36));
+        final OutboxStore outboxStore = protectionCache;
+        final OutboxDispatcher dispatcher = new OutboxDispatcher(
+                outboxStore, protectionCache::publishOutboxEvent, workerId,
+                batchSize, maxAttempts, leaseMillis, retryBaseMillis);
+        dispatcher.start(intervalMillis);
+        return dispatcher;
+    }
+
+    private void registerLoadedWorlds() {
+        if (!(protectionCache instanceof WorldRegistryStore worldRegistryStore)) {
+            return;
+        }
+        final String serverGroup = getConfig().getString("redis.server-group",
+                getConfig().getString("redis.network-id", "default"));
+        for (final World world : getServer().getWorlds()) {
+            try {
+                worldRegistryStore.registerWorld(new WorldIdentity(world.getUID(), world.getName(), serverGroup, 0L)).join();
+            } catch (RuntimeException exception) {
+                throw new IllegalStateException("Unable to register world identity " + world.getName(), exception);
+            }
+        }
+    }
+
+    private void scheduleAuditRetention() {
+        if (!getConfig().getBoolean("audit.enabled", true)) {
+            return;
+        }
+        final int retentionDays = Math.max(1, getConfig().getInt("audit.retention-days", 90));
+        final long retentionMillis = java.util.concurrent.TimeUnit.DAYS.toMillis(retentionDays);
+        final Runnable purge = () -> {
+            final long cutoff = Math.max(0L, System.currentTimeMillis() - retentionMillis);
+            if (bolt.getStore() instanceof org.popcraft.bolt.data.AuditStore auditStore) {
+                auditStore.purgeAuditEventsBefore(cutoff).whenComplete((removed, exception) -> {
+                    if (exception != null) {
+                        getLogger().log(java.util.logging.Level.WARNING, "Audit retention purge failed", exception);
+                    } else if (removed != null && removed > 0) {
+                        getLogger().info(() -> "Purged " + removed + " expired Bolt audit events");
+                    }
+                });
+            }
+        };
+        purge.run();
+        final long intervalTicks = Math.max(20L, java.util.concurrent.TimeUnit.DAYS.toSeconds(1) * 20L);
+        org.popcraft.bolt.util.SchedulerUtil.schedule(this, purge, intervalTicks, intervalTicks);
     }
 
     public void reload() {
@@ -497,22 +590,44 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
 
     private void registerEvents() {
         final PluginManager pluginManager = getServer().getPluginManager();
+        pluginManager.registerEvents(new Listener() {
+            @EventHandler
+            public void onWorldLoad(final org.bukkit.event.world.WorldLoadEvent event) {
+                registerWorldAfterLoad(event.getWorld());
+            }
+        }, this);
         this.protectionMenu = new ProtectionMenu(this);
         pluginManager.registerEvents(protectionMenu, this);
         pluginManager.registerEvents(new BlockListener(this), this);
         final EntityListener entityListener = new EntityListener(this);
         pluginManager.registerEvents(entityListener, this);
         if (ItemTransportingEntityValidateTargetEventListener.canUse()) {
-            pluginManager.registerEvents(new ItemTransportingEntityValidateTargetEventListener(entityListener::onItemTransportingEntityValidateTarget), this);
+            pluginManager.registerEvents(new ItemTransportingEntityValidateTargetEventListener(this, entityListener::onItemTransportingEntityValidateTarget), this);
         }
         pluginManager.registerEvents(new InventoryListener(this), this);
         pluginManager.registerEvents(new PlayerListener(this), this);
+    }
+
+    private void registerWorldAfterLoad(final World world) {
+        if (!(protectionCache instanceof WorldRegistryStore worldRegistryStore)) {
+            return;
+        }
+        final String serverGroup = getConfig().getString("redis.server-group",
+                getConfig().getString("redis.network-id", "default"));
+        worldRegistryStore.registerWorld(new WorldIdentity(world.getUID(), world.getName(), serverGroup, 0L))
+                .whenComplete((ignored, exception) -> {
+                    if (exception != null) {
+                        getLogger().log(java.util.logging.Level.SEVERE,
+                                "Unable to register world identity " + world.getName(), exception);
+                    }
+                });
     }
 
     private void registerCommands() {
         commands.put("admin", new AdminCommand(this));
         commands.put("edit", new EditCommand(this));
         commands.put("group", new GroupCommand(this));
+        commands.put("health", new HealthCommand(this));
         commands.put("help", new HelpCommand(this));
         commands.put("info", new InfoCommand(this));
         commands.put("lock", new LockCommand(this));
@@ -694,6 +809,24 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
         return loadProtection(entity) != null;
     }
 
+    /**
+     * Performs one bounded exact-location lookup for world-event guards.
+     * Portal ignition can provide thousands of candidate frame blocks; using
+     * this seam avoids one SQL round trip per block.
+     */
+    public boolean hasProtectedBlocks(final Collection<Block> blocks) {
+        if (blocks == null || blocks.isEmpty()) {
+            return false;
+        }
+        final Set<BlockLocation> locations = blocks.stream()
+                .map(block -> new BlockLocation(block.getWorld().getName(), block.getX(), block.getY(), block.getZ()))
+                .collect(java.util.stream.Collectors.toSet());
+        if (bolt.getStore() instanceof BulkBlockLookupStore bulkBlockLookupStore) {
+            return !bulkBlockLookupStore.loadBlockProtections(locations).join().isEmpty();
+        }
+        return blocks.stream().anyMatch(this::isProtectedExact);
+    }
+
     @Override
     public BlockProtection createProtection(final Block block, final UUID owner, final String type) {
         final long now = System.currentTimeMillis();
@@ -807,7 +940,23 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
         if (protection == null || permissions.length == 0) {
             return true;
         }
+        if (bolt.getStore() instanceof ConsistencyAwareStore consistencyAwareStore
+                && !consistencyAwareStore.allows(SensitiveOperation.AUTHORIZATION)) {
+            return false;
+        }
         return permissions.length == 1 ? canAccessSingle(protection, sourceResolver, permissions[0]) : canAccessMulti(protection, sourceResolver, permissions);
+    }
+
+    public boolean allowsSensitiveOperation(final SensitiveOperation operation) {
+        return !(bolt.getStore() instanceof ConsistencyAwareStore consistencyAwareStore)
+                || consistencyAwareStore.allows(operation);
+    }
+
+    public ConsistencyHealth.Snapshot consistencyHealth() {
+        if (bolt.getStore() instanceof ConsistencyAwareStore consistencyAwareStore) {
+            return consistencyAwareStore.healthSnapshot();
+        }
+        return new ConsistencyHealth.Snapshot(org.popcraft.bolt.data.HealthState.HEALTHY, null, System.currentTimeMillis());
     }
 
     private boolean canAccessMulti(final Protection protection, final SourceResolver sourceResolver, final String... permissions) {

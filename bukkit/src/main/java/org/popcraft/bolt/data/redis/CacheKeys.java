@@ -20,6 +20,14 @@ public final class CacheKeys {
         return "protection:entity:" + id;
     }
 
+    public static String group(final String name) {
+        return "protection:group:" + name;
+    }
+
+    public static String accessList(final UUID owner) {
+        return "protection:access-list:" + owner;
+    }
+
     public static String invalidationChannel() {
         return "invalidation";
     }
