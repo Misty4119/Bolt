@@ -194,3 +194,4 @@ crash-reports/
 # Local-only engineering roadmap and validation records
 /docs/IMPLEMENTATION_PLAN.md
 /docs/VALIDATION.md
+/docs/plugdev-bolt-*.yml
