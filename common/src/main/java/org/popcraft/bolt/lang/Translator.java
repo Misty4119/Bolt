@@ -17,10 +17,36 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.regex.Pattern;
 import java.util.logging.LogManager;
+import java.util.logging.Logger;
 import java.util.stream.Stream;
 
 public final class Translator {
+    private static final Logger LOGGER = Logger.getLogger(Translator.class.getName());
+    private static final Pattern TAG_PATTERN = Pattern.compile("<([A-Za-z0-9_:-]+)>");
+    private static final Set<String> REQUIRED_TAGS = Set.of(
+            Translation.Placeholder.ACCESS_LIST, Translation.Placeholder.ACCESS_LIST_SIZE,
+            Translation.Placeholder.ACCESS_TYPE, Translation.Placeholder.ACTION,
+            Translation.Placeholder.COMMAND, Translation.Placeholder.COMMAND_2,
+            Translation.Placeholder.LITERAL, Translation.Placeholder.GROUP,
+            Translation.Placeholder.GROUP_MEMBERS, Translation.Placeholder.MODE,
+            Translation.Placeholder.NEW_PLAYER, Translation.Placeholder.NEW_PLUGIN,
+            Translation.Placeholder.OLD_PLAYER, Translation.Placeholder.OLD_PLUGIN,
+            Translation.Placeholder.PLAYER, Translation.Placeholder.PROTECTION,
+            Translation.Placeholder.PROTECTION_TYPE, Translation.Placeholder.SOURCE_TYPE,
+            Translation.Placeholder.SOURCE_IDENTIFIER, Translation.Placeholder.RAW_PROTECTION,
+            Translation.Placeholder.COUNT, Translation.Placeholder.COUNT_BLOCKS,
+            Translation.Placeholder.COUNT_ENTITIES, Translation.Placeholder.SECONDS,
+            Translation.Placeholder.WORLD, Translation.Placeholder.X,
+            Translation.Placeholder.Y, Translation.Placeholder.Z, Translation.Placeholder.TIME,
+            Translation.Placeholder.FIRST, Translation.Placeholder.LAST,
+            Translation.Placeholder.PAGES, Translation.Placeholder.PAGE,
+            Translation.Placeholder.CREATED_TIME, Translation.Placeholder.ACCESSED_TIME,
+            Translation.Placeholder.NUMBER, "newline"
+    );
     private static final String TRANSLATION_FILE_FORMAT = "lang/%s.properties";
     private static final Properties fallback = loadTranslation("en");
     private static Properties translation = loadTranslation("en");
@@ -122,7 +148,7 @@ public final class Translator {
                 // If a default locale exists for this language, load it as a base. This allows any translation keys
                 // that do not have a custom translation set to still fall through to the built-in translation.
                 final Properties properties = languages.getOrDefault(locale, new Properties());
-                properties.putAll(loadTranslationFromFile(path));
+                mergeTranslation(properties, loadTranslationFromFile(path), path);
                 languages.put(locale, properties);
             });
         } catch (IOException e) {
@@ -163,6 +189,37 @@ public final class Translator {
             e.printStackTrace();
         }
         return properties;
+    }
+
+    private static void mergeTranslation(final Properties target, final Properties custom, final Path path) {
+        custom.stringPropertyNames().forEach(key -> {
+            final String candidate = custom.getProperty(key);
+            final String expected = fallback.getProperty(key);
+            final Set<String> missing = expected == null ? Set.of() : missingRequiredTags(expected, candidate);
+            if (!missing.isEmpty()) {
+                LOGGER.warning(() -> "Ignoring translation " + path.getFileName() + "." + key
+                        + ": missing required tags " + missing);
+                return;
+            }
+            target.setProperty(key, candidate);
+        });
+    }
+
+    private static Set<String> missingRequiredTags(final String expected, final String candidate) {
+        final Set<String> expectedTags = tags(expected);
+        expectedTags.retainAll(REQUIRED_TAGS);
+        final Set<String> actualTags = tags(candidate);
+        expectedTags.removeAll(actualTags);
+        return expectedTags;
+    }
+
+    private static Set<String> tags(final String value) {
+        final Set<String> tags = new HashSet<>();
+        final var matcher = TAG_PATTERN.matcher(value == null ? "" : value);
+        while (matcher.find()) {
+            tags.add(matcher.group(1));
+        }
+        return tags;
     }
 
     public static Locale parseLocale(final String string) {

@@ -23,6 +23,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -34,7 +35,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-public class SQLStore implements Store, VersionedStore, AuditStore {
+public class SQLStore implements Store, VersionedStore, AuditStore, OutboxStore, WorldRegistryStore, WatermarkStore, BulkBlockLookupStore {
     private static final Logger LOGGER = Logger.getLogger(SQLStore.class.getName());
     private static final List<String> BLOCK_COLUMNS = List.of(
             "id", "owner_id", "type", "created_at", "accessed_at", "world_id", "x", "y", "z", "block", "version", "updated_at"
@@ -94,6 +95,170 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
 
     public DatabaseType databaseType() {
         return databaseType;
+    }
+
+    @Override
+    public CompletableFuture<WorldIdentity> registerWorld(final WorldIdentity identity) {
+        Objects.requireNonNull(identity, "identity");
+        return submitWriteValue(connection -> {
+            final WorldIdentity[] registered = new WorldIdentity[1];
+            inTransaction(connection, () -> {
+                final String findByUuid = "SELECT world_uuid, name, server_group, version FROM %s WHERE world_uuid = ?".formatted(table("worlds"));
+                try (PreparedStatement statement = connection.prepareStatement(findByUuid)) {
+                    statement.setString(1, identity.worldUuid().toString());
+                    try (ResultSet result = statement.executeQuery()) {
+                        if (result.next()) {
+                            final String currentGroup = result.getString("server_group");
+                            if (!identity.serverGroup().equals(currentGroup)) {
+                                throw new WorldIdentityConflictException("World UUID " + identity.worldUuid() + " belongs to server group " + currentGroup);
+                            }
+                            final long currentVersion = result.getLong("version");
+                            if (identity.version() != 0 && identity.version() != currentVersion) {
+                                throw new StaleWriteException("world", identity.worldUuid().toString(), identity.version());
+                            }
+                            final String currentName = result.getString("name");
+                            if (currentName.equals(identity.name())) {
+                                registered[0] = new WorldIdentity(identity.worldUuid(), currentName, currentGroup, currentVersion);
+                                return;
+                            }
+                            ensureWorldNameAvailable(connection, identity);
+                            final long nextVersion = nextVersion(currentVersion);
+                            final String update = "UPDATE %s SET name = ?, updated_at = ?, version = ? WHERE world_uuid = ? AND version = ?".formatted(table("worlds"));
+                            try (PreparedStatement updateStatement = connection.prepareStatement(update)) {
+                                updateStatement.setString(1, identity.name());
+                                updateStatement.setLong(2, System.currentTimeMillis());
+                                updateStatement.setLong(3, nextVersion);
+                                updateStatement.setString(4, identity.worldUuid().toString());
+                                updateStatement.setLong(5, currentVersion);
+                                if (updateStatement.executeUpdate() != 1) {
+                                    throw new StaleWriteException("world", identity.worldUuid().toString(), currentVersion);
+                                }
+                            }
+                            registered[0] = new WorldIdentity(identity.worldUuid(), identity.name(), currentGroup, nextVersion);
+                            return;
+                        }
+                    }
+                }
+                ensureWorldNameAvailable(connection, identity);
+                final String insert = "INSERT INTO %s (world_id, world_uuid, name, server_group, status, created_at, updated_at, version) VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?)".formatted(table("worlds"));
+                final long now = System.currentTimeMillis();
+                try (PreparedStatement statement = connection.prepareStatement(insert)) {
+                    statement.setString(1, identity.worldUuid().toString());
+                    statement.setString(2, identity.worldUuid().toString());
+                    statement.setString(3, identity.name());
+                    statement.setString(4, identity.serverGroup());
+                    statement.setLong(5, now);
+                    statement.setLong(6, now);
+                    statement.setLong(7, 1L);
+                    statement.executeUpdate();
+                }
+                registered[0] = new WorldIdentity(identity.worldUuid(), identity.name(), identity.serverGroup(), 1L);
+            });
+            return registered[0];
+        });
+    }
+
+    @Override
+    public CompletableFuture<WorldIdentity> loadWorld(final UUID worldUuid) {
+        Objects.requireNonNull(worldUuid, "worldUuid");
+        return submit(connection -> {
+            final String sql = "SELECT world_uuid, name, server_group, version FROM %s WHERE world_uuid = ?".formatted(table("worlds"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, worldUuid.toString());
+                try (ResultSet result = statement.executeQuery()) {
+                    if (!result.next()) {
+                        return null;
+                    }
+                    return new WorldIdentity(
+                            UUID.fromString(result.getString("world_uuid")),
+                            result.getString("name"),
+                            result.getString("server_group"),
+                            result.getLong("version")
+                    );
+                }
+            }
+        });
+    }
+
+    @Override
+    public CompletableFuture<Long> loadWatermark(final String aggregateType, final String aggregateId) {
+        requireAggregateIdentity(aggregateType, aggregateId);
+        return submit(connection -> {
+            final String sql = "SELECT aggregate_version FROM %s WHERE aggregate_type = ? AND aggregate_id = ?".formatted(table("watermarks"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, aggregateType);
+                statement.setString(2, aggregateId);
+                try (ResultSet result = statement.executeQuery()) {
+                    return result.next() ? result.getLong(1) : 0L;
+                }
+            }
+        });
+    }
+
+    @Override
+    public CompletableFuture<Boolean> advanceWatermark(final String aggregateType, final String aggregateId,
+                                                       final long aggregateVersion, final long updatedAt) {
+        requireAggregateIdentity(aggregateType, aggregateId);
+        if (aggregateVersion < 0 || updatedAt < 0) {
+            throw new IllegalArgumentException("Watermark version and timestamp must not be negative");
+        }
+        return submitWriteValue(connection -> {
+            final boolean[] advanced = {false};
+            inTransaction(connection, () -> {
+                final String select = "SELECT aggregate_version FROM %s WHERE aggregate_type = ? AND aggregate_id = ?%s".formatted(
+                        table("watermarks"), databaseType.fileBacked() ? "" : " FOR UPDATE");
+                Long current = null;
+                try (PreparedStatement statement = connection.prepareStatement(select)) {
+                    statement.setString(1, aggregateType);
+                    statement.setString(2, aggregateId);
+                    try (ResultSet result = statement.executeQuery()) {
+                        if (result.next()) {
+                            current = result.getLong(1);
+                        }
+                    }
+                }
+                if (current != null && aggregateVersion <= current) {
+                    return;
+                }
+                if (current == null) {
+                    final String insert = "INSERT INTO %s (aggregate_type, aggregate_id, aggregate_version, updated_at) VALUES (?, ?, ?, ?)".formatted(table("watermarks"));
+                    try (PreparedStatement statement = connection.prepareStatement(insert)) {
+                        statement.setString(1, aggregateType);
+                        statement.setString(2, aggregateId);
+                        statement.setLong(3, aggregateVersion);
+                        statement.setLong(4, updatedAt);
+                        statement.executeUpdate();
+                    }
+                } else {
+                    final String update = "UPDATE %s SET aggregate_version = ?, updated_at = ? WHERE aggregate_type = ? AND aggregate_id = ? AND aggregate_version < ?".formatted(table("watermarks"));
+                    try (PreparedStatement statement = connection.prepareStatement(update)) {
+                        statement.setLong(1, aggregateVersion);
+                        statement.setLong(2, updatedAt);
+                        statement.setString(3, aggregateType);
+                        statement.setString(4, aggregateId);
+                        statement.setLong(5, aggregateVersion);
+                        if (statement.executeUpdate() != 1) {
+                            return;
+                        }
+                    }
+                }
+                advanced[0] = true;
+            });
+            return advanced[0];
+        });
+    }
+
+    private void ensureWorldNameAvailable(final Connection connection, final WorldIdentity identity) throws SQLException {
+        final String sql = "SELECT world_uuid FROM %s WHERE name = ? AND server_group = ?".formatted(table("worlds"));
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, identity.name());
+            statement.setString(2, identity.serverGroup());
+            try (ResultSet result = statement.executeQuery()) {
+                if (result.next() && !identity.worldUuid().toString().equals(result.getString("world_uuid"))) {
+                    throw new WorldIdentityConflictException("World name " + identity.name() + " is already registered in server group " + identity.serverGroup());
+                }
+            }
+        }
     }
 
     private void prepareSqlitePath() {
@@ -179,6 +344,41 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
     }
 
     @Override
+    public CompletableFuture<Collection<BlockProtection>> loadBlockProtections(final Collection<BlockLocation> locations) {
+        final List<BlockLocation> requested = locations == null ? List.of() : locations.stream().distinct().toList();
+        if (requested.isEmpty()) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        return submit(connection -> {
+            final List<BlockProtection> protections = new ArrayList<>();
+            // Keep the parameter count bounded for SQLite and avoid oversized
+            // packets on network databases. Four columns are bound per row.
+            for (int offset = 0; offset < requested.size(); offset += 150) {
+                final List<BlockLocation> batch = requested.subList(offset, Math.min(requested.size(), offset + 150));
+                final String predicates = batch.stream()
+                        .map(ignored -> "(world_id = ? AND x = ? AND y = ? AND z = ?)")
+                        .collect(java.util.stream.Collectors.joining(" OR "));
+                final String sql = "SELECT id, owner_id, type, created_at, accessed_at, world_id, x, y, z, block, version, updated_at FROM %s WHERE %s".formatted(table("blocks"), predicates);
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    int index = 1;
+                    for (final BlockLocation location : batch) {
+                        statement.setString(index++, location.world());
+                        statement.setInt(index++, location.x());
+                        statement.setInt(index++, location.y());
+                        statement.setInt(index++, location.z());
+                    }
+                    try (ResultSet result = statement.executeQuery()) {
+                        while (result.next()) {
+                            protections.add(readBlock(connection, result));
+                        }
+                    }
+                }
+            }
+            return protections;
+        });
+    }
+
+    @Override
     public CompletableFuture<Collection<BlockProtection>> loadBlockProtections() {
         return submit(connection -> {
             final String sql = "SELECT id, owner_id, type, created_at, accessed_at, world_id, x, y, z, block, version, updated_at FROM %s".formatted(table("blocks"));
@@ -251,6 +451,7 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
                 }
             }
             replaceProtectionAccess(connection, protection.getId().toString(), protection.getAccess(), nextVersion);
+            enqueueMutationEvent(connection, "protection.updated", "block", protection.getId().toString(), nextVersion, "UPSERT");
         });
         protection.setVersion(nextVersion);
         return nextVersion;
@@ -278,6 +479,8 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
                 }
                 if (removed[0]) {
                     deleteProtectionAccess(connection, protection.getId().toString());
+                    enqueueMutationEvent(connection, "protection.removed", "block", protection.getId().toString(),
+                            nextVersion(protection.getVersion()), "DELETE");
                 }
             });
             return removed[0];
@@ -362,6 +565,7 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
                 }
             }
             replaceProtectionAccess(connection, protection.getId().toString(), protection.getAccess(), nextVersion);
+            enqueueMutationEvent(connection, "protection.updated", "entity", protection.getId().toString(), nextVersion, "UPSERT");
         });
         protection.setVersion(nextVersion);
         return nextVersion;
@@ -389,6 +593,8 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
                 }
                 if (removed[0]) {
                     deleteProtectionAccess(connection, protection.getId().toString());
+                    enqueueMutationEvent(connection, "protection.removed", "entity", protection.getId().toString(),
+                            nextVersion(protection.getVersion()), "DELETE");
                 }
             });
             return removed[0];
@@ -517,6 +723,7 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
                 }
                 statement.executeBatch();
             }
+            enqueueMutationEvent(connection, "group.updated", "group", group.getName(), nextVersion, "UPSERT");
             });
             group.setVersion(nextVersion);
             return nextVersion;
@@ -545,6 +752,8 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
                 }
                 if (removed[0]) {
                     delete(connection, table("group_members"), "group_name", group.getName());
+                    enqueueMutationEvent(connection, "group.removed", "group", group.getName(),
+                            nextVersion(group.getVersion()), "DELETE");
                 }
             });
             return removed[0];
@@ -638,6 +847,7 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
                 }
                 statement.executeBatch();
             }
+            enqueueMutationEvent(connection, "access-list.updated", "access-list", accessList.getOwner().toString(), nextVersion, "UPSERT");
             });
             accessList.setVersion(nextVersion);
             return nextVersion;
@@ -666,6 +876,8 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
                 }
                 if (removed[0]) {
                     delete(connection, table("access_list_entries"), "owner_id", accessList.getOwner().toString());
+                    enqueueMutationEvent(connection, "access-list.removed", "access-list", accessList.getOwner().toString(),
+                            nextVersion(accessList.getVersion()), "DELETE");
                 }
             });
             return removed[0];
@@ -702,6 +914,99 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
     }
 
     @Override
+    public CompletableFuture<Void> enqueueOutboxEvent(final OutboxEvent event) {
+        if (event.status() != OutboxEvent.Status.PENDING) {
+            throw new IllegalArgumentException("New outbox events must start in PENDING status");
+        }
+        return submitWrite(connection -> {
+            insertOutboxEvent(connection, event);
+        });
+    }
+
+    @Override
+    public CompletableFuture<Collection<OutboxEvent>> claimOutboxEvents(final String workerId, final int limit,
+                                                                          final long now, final long leaseUntil) {
+        requireWorker(workerId);
+        if (limit < 1 || limit > 2_000 || now < 0 || leaseUntil <= now) {
+            throw new IllegalArgumentException("Invalid outbox claim arguments");
+        }
+        return submitWriteValue(connection -> {
+            final List<OutboxEvent> events = new ArrayList<>();
+            inTransaction(connection, () -> {
+                final String select = "SELECT id, event_type, aggregate_type, aggregate_id, aggregate_version, payload, status, next_attempt_at, lease_owner, lease_until, last_error, published_at, attempts, created_at FROM %s WHERE ((status IN ('PENDING', 'RETRY_WAIT') AND next_attempt_at <= ?) OR (status = 'LEASED' AND lease_until < ?)) ORDER BY created_at, id LIMIT %d%s".formatted(table("outbox"), limit,
+                        databaseType.fileBacked() ? "" : " FOR UPDATE SKIP LOCKED");
+                final List<UUID> ids = new ArrayList<>();
+                try (PreparedStatement statement = connection.prepareStatement(select)) {
+                    statement.setLong(1, now);
+                    statement.setLong(2, now);
+                    try (ResultSet result = statement.executeQuery()) {
+                        while (result.next()) {
+                            ids.add(UUID.fromString(result.getString("id")));
+                            events.add(readOutboxEvent(result));
+                        }
+                    }
+                }
+                final String update = "UPDATE %s SET status = 'LEASED', lease_owner = ?, lease_until = ?, attempts = attempts + 1 WHERE id = ? AND ((status IN ('PENDING', 'RETRY_WAIT') AND next_attempt_at <= ?) OR (status = 'LEASED' AND lease_until < ?))".formatted(table("outbox"));
+                try (PreparedStatement statement = connection.prepareStatement(update)) {
+                    for (final UUID id : ids) {
+                        statement.setString(1, workerId);
+                        statement.setLong(2, leaseUntil);
+                        statement.setString(3, id.toString());
+                        statement.setLong(4, now);
+                        statement.setLong(5, now);
+                        if (statement.executeUpdate() != 1) {
+                            throw new SQLException("Unable to lease outbox event " + id);
+                        }
+                    }
+                }
+            });
+            return events.stream().map(event -> new OutboxEvent(event.id(), event.eventType(), event.aggregateType(),
+                    event.aggregateId(), event.aggregateVersion(), event.payload(), OutboxEvent.Status.LEASED,
+                    event.nextAttemptAt(), workerId, leaseUntil, event.lastError(), event.attempts() + 1,
+                    event.createdAt(), event.publishedAt())).toList();
+        });
+    }
+
+    @Override
+    public CompletableFuture<Boolean> acknowledgeOutboxEvent(final UUID eventId, final String workerId, final long publishedAt) {
+        Objects.requireNonNull(eventId, "eventId");
+        requireWorker(workerId);
+        if (publishedAt < 0) {
+            throw new IllegalArgumentException("publishedAt must not be negative");
+        }
+        return submitWriteValue(connection -> {
+            final String sql = "UPDATE %s SET status = 'PUBLISHED', published_at = ?, lease_owner = NULL, lease_until = NULL, last_error = NULL WHERE id = ? AND status = 'LEASED' AND lease_owner = ?".formatted(table("outbox"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setLong(1, publishedAt);
+                statement.setString(2, eventId.toString());
+                statement.setString(3, workerId);
+                return statement.executeUpdate() == 1;
+            }
+        });
+    }
+
+    @Override
+    public CompletableFuture<Boolean> retryOutboxEvent(final UUID eventId, final String workerId, final long nextAttemptAt,
+                                                       final String error, final boolean deadLetter) {
+        Objects.requireNonNull(eventId, "eventId");
+        requireWorker(workerId);
+        if (nextAttemptAt < 0 || error == null || error.isBlank()) {
+            throw new IllegalArgumentException("Invalid outbox retry arguments");
+        }
+        return submitWriteValue(connection -> {
+            final String sql = "UPDATE %s SET status = ?, next_attempt_at = ?, lease_owner = NULL, lease_until = NULL, last_error = ? WHERE id = ? AND status = 'LEASED' AND lease_owner = ?".formatted(table("outbox"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, deadLetter ? OutboxEvent.Status.DEAD_LETTER.name() : OutboxEvent.Status.RETRY_WAIT.name());
+                statement.setLong(2, nextAttemptAt);
+                statement.setString(3, error);
+                statement.setString(4, eventId.toString());
+                statement.setString(5, workerId);
+                return statement.executeUpdate() == 1;
+            }
+        });
+    }
+
+    @Override
     public CompletableFuture<Collection<AuditEvent>> loadRecentAuditEvents(final UUID protectionId, final int limit) {
         if (limit < 1 || limit > 1000) {
             throw new IllegalArgumentException("Audit limit must be between 1 and 1000");
@@ -721,6 +1026,20 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
         });
     }
 
+    @Override
+    public CompletableFuture<Long> purgeAuditEventsBefore(final long cutoffMillis) {
+        if (cutoffMillis < 0) {
+            throw new IllegalArgumentException("Audit cutoff must not be negative");
+        }
+        return submitWriteValue(connection -> {
+            final String sql = "DELETE FROM %s WHERE created_at < ?".formatted(table("audit_events"));
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setLong(1, cutoffMillis);
+                return (long) statement.executeUpdate();
+            }
+        });
+    }
+
     private AuditEvent readAuditEvent(final ResultSet result) throws SQLException {
         final String actorId = result.getString("actor_id");
         final String eventProtectionId = result.getString("protection_id");
@@ -736,6 +1055,93 @@ public class SQLStore implements Store, VersionedStore, AuditStore {
                 result.getString("item_type"), nullableInt(result, "item_amount"),
                 result.getString("metadata"), result.getLong("created_at")
         );
+    }
+
+    private void enqueueMutationEvent(final Connection connection, final String eventType, final String aggregateType,
+                                      final String aggregateId, final long aggregateVersion, final String operation) throws SQLException {
+        final String payload = "{\"operation\":\"%s\",\"aggregate_type\":\"%s\",\"aggregate_id\":\"%s\",\"version\":%d}"
+                .formatted(escapeJson(operation), escapeJson(aggregateType), escapeJson(aggregateId), aggregateVersion);
+        insertOutboxEvent(connection, OutboxEvent.pending(UUID.randomUUID(), eventType, aggregateType, aggregateId,
+                aggregateVersion, payload, System.currentTimeMillis()));
+    }
+
+    private void insertOutboxEvent(final Connection connection, final OutboxEvent event) throws SQLException {
+        final String sql = "INSERT INTO %s (id, event_type, aggregate_type, aggregate_id, aggregate_version, payload, status, next_attempt_at, lease_owner, lease_until, last_error, published_at, attempts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)".formatted(table("outbox"));
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, event.id().toString());
+            statement.setString(2, event.eventType());
+            statement.setString(3, event.aggregateType());
+            statement.setString(4, event.aggregateId());
+            statement.setLong(5, event.aggregateVersion());
+            statement.setString(6, event.payload());
+            statement.setString(7, event.status().name());
+            statement.setLong(8, event.nextAttemptAt());
+            setNullableString(statement, 9, event.leaseOwner());
+            setNullableLong(statement, 10, event.leaseUntil());
+            setNullableString(statement, 11, event.lastError());
+            setNullableLong(statement, 12, event.publishedAt());
+            statement.setLong(13, event.attempts());
+            statement.setLong(14, event.createdAt());
+            statement.executeUpdate();
+        }
+    }
+
+    private static String escapeJson(final String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\r", "\\r").replace("\n", "\\n");
+    }
+
+    private static void requireAggregateIdentity(final String aggregateType, final String aggregateId) {
+        if (aggregateType == null || aggregateType.isBlank() || aggregateType.length() > 64
+                || aggregateId == null || aggregateId.isBlank() || aggregateId.length() > 255) {
+            throw new IllegalArgumentException("Invalid watermark aggregate identity");
+        }
+    }
+
+    private static OutboxEvent readOutboxEvent(final ResultSet result) throws SQLException {
+        final String leaseOwner = result.getString("lease_owner");
+        final long leaseUntil = result.getLong("lease_until");
+        final Long nullableLeaseUntil = result.wasNull() ? null : leaseUntil;
+        final long publishedAt = result.getLong("published_at");
+        final Long nullablePublishedAt = result.wasNull() ? null : publishedAt;
+        return new OutboxEvent(
+                UUID.fromString(result.getString("id")),
+                result.getString("event_type"),
+                result.getString("aggregate_type"),
+                result.getString("aggregate_id"),
+                result.getLong("aggregate_version"),
+                result.getString("payload"),
+                OutboxEvent.Status.valueOf(result.getString("status")),
+                result.getLong("next_attempt_at"),
+                leaseOwner,
+                nullableLeaseUntil,
+                result.getString("last_error"),
+                result.getLong("attempts"),
+                result.getLong("created_at"),
+                nullablePublishedAt
+        );
+    }
+
+    private static void setNullableString(final PreparedStatement statement, final int index, final String value) throws SQLException {
+        if (value == null) {
+            statement.setNull(index, java.sql.Types.VARCHAR);
+        } else {
+            statement.setString(index, value);
+        }
+    }
+
+    private static void setNullableLong(final PreparedStatement statement, final int index, final Long value) throws SQLException {
+        if (value == null) {
+            statement.setNull(index, java.sql.Types.BIGINT);
+        } else {
+            statement.setLong(index, value);
+        }
+    }
+
+    private static void requireWorker(final String workerId) {
+        if (workerId == null || workerId.isBlank() || workerId.length() > 128 || !workerId.matches("[A-Za-z0-9_.:-]+")) {
+            throw new IllegalArgumentException("Invalid outbox worker ID");
+        }
     }
 
     private static Integer nullableInt(final ResultSet result, final String column) throws SQLException {

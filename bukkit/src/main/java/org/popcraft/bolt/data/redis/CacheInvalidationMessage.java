@@ -22,6 +22,9 @@ public record CacheInvalidationMessage(String networkId, String serverId, String
     }
 
     public static CacheInvalidationMessage decode(final String encoded) {
+        if (encoded == null || encoded.length() > 4096) {
+            throw new IllegalArgumentException("Invalid Bolt cache invalidation message");
+        }
         final String[] fields = encoded == null ? new String[0] : encoded.split("\\|", -1);
         if (fields.length != 6) {
             throw new IllegalArgumentException("Invalid Bolt cache invalidation message");

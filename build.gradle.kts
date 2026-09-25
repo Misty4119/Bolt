@@ -12,7 +12,7 @@ subprojects {
     plugins.apply("com.gradleup.shadow")
 
     group = "${project.property("group")}"
-    version = "${project.property("version")}.${commitsSinceLastTag()}"
+    version = project.findProperty("releaseVersion")?.toString() ?: "${project.property("version")}.${commitsSinceLastTag()}"
 
     java {
         toolchain {
@@ -25,7 +25,7 @@ subprojects {
     tasks {
         withType<JavaCompile> {
             options.encoding = "UTF-8"
-            options.release = 21
+            options.release = 25
         }
         jar {
             archiveClassifier.set("noshade")

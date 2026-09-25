@@ -1,7 +1,7 @@
 name: ${name}
 version: ${version}
 main: ${group}.bolt.BoltPlugin
-api-version: "1.20.6"
+api-version: "26.2"
 folia-supported: true
 authors: [ pop4959, rymiel ]
 description: ${description}
@@ -56,6 +56,8 @@ permissions:
     default: true
   bolt.command.group:
     default: true
+  bolt.command.health:
+    default: op
   bolt.command.help:
     default: true
   bolt.command.info:

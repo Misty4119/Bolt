@@ -5,4 +5,5 @@ repositories {
 
 dependencies {
     compileOnly(group = "io.canvasmc.canvas", name = "canvas-api", version = "26.2.build.941-stable")
+    api(project(":bolt-common"))
 }
