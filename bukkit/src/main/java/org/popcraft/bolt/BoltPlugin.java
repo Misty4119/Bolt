@@ -266,8 +266,10 @@ public class BoltPlugin extends JavaPlugin implements BoltAPI {
             outboxDispatcher.close();
         }
         commands.clear();
-        getLogger().info(() -> "Flushing protection updates (%d)".formatted(bolt.getStore().pendingSave()));
-        bolt.getStore().flush().join();
+        if (bolt != null) {
+            getLogger().info(() -> "Flushing protection updates (%d)".formatted(bolt.getStore().pendingSave()));
+            bolt.getStore().flush().join();
+        }
         if (protectionCache != null) {
             protectionCache.close();
         }

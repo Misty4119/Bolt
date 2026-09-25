@@ -63,7 +63,7 @@ final class SQLStoreTest {
                  var result = statement.executeQuery("SELECT version FROM test_bolt_schema_version")) {
                 assertNotNull(result);
                 result.next();
-                assertEquals(2, result.getInt(1));
+                assertEquals(3, result.getInt(1));
             }
 
             final AuditEvent auditEvent = new AuditEvent(

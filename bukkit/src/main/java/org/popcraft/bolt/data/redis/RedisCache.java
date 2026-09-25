@@ -42,7 +42,21 @@ public final class RedisCache implements CacheTransport {
         this.cacheConnection = sentinel
                 ? MasterReplica.connect(client, StringCodec.UTF8, redisUri)
                 : client.connect();
-        this.pubSubConnection = connectPubSub();
+        try {
+            this.pubSubConnection = connectPubSub();
+        } catch (RuntimeException | Error exception) {
+            try {
+                cacheConnection.close();
+            } catch (RuntimeException cleanupException) {
+                exception.addSuppressed(cleanupException);
+            }
+            try {
+                client.shutdown();
+            } catch (RuntimeException cleanupException) {
+                exception.addSuppressed(cleanupException);
+            }
+            throw exception;
+        }
     }
 
     public static boolean isSentinelUri(final String uri) {
@@ -120,19 +134,28 @@ public final class RedisCache implements CacheTransport {
     private RedisURI resolveMasterUri() {
         try (StatefulRedisSentinelConnection<String, String> sentinelConnection = client.connectSentinel(redisUri)) {
             final SocketAddress address = sentinelConnection.sync().getMasterAddrByName(redisUri.getSentinelMasterId());
-            if (!(address instanceof InetSocketAddress inetAddress) || inetAddress.isUnresolved()) {
-                throw new IllegalStateException("Redis Sentinel returned an unusable master address");
-            }
-            return RedisURI.builder()
-                    .withHost(inetAddress.getHostString())
-                    .withPort(inetAddress.getPort())
-                    .withAuthentication(redisUri)
-                    .withSsl(redisUri)
-                    .withDatabase(redisUri.getDatabase())
-                    .withTimeout(redisUri.getTimeout())
-                    .withClientName(redisUri.getClientName())
-                    .build();
+            return masterUriForAddress(address, redisUri);
         }
+    }
+
+    static RedisURI masterUriForAddress(final SocketAddress address, final RedisURI sentinelUri) {
+        if (!(address instanceof InetSocketAddress inetAddress)
+                || inetAddress.getHostString().isBlank()
+                || inetAddress.getPort() < 1
+                || inetAddress.getPort() > 65_535) {
+            throw new IllegalStateException("Redis Sentinel returned an unusable master address");
+        }
+        final RedisURI.Builder builder = RedisURI.builder()
+                .withHost(inetAddress.getHostString())
+                .withPort(inetAddress.getPort())
+                .withAuthentication(sentinelUri)
+                .withSsl(sentinelUri)
+                .withDatabase(sentinelUri.getDatabase())
+                .withTimeout(sentinelUri.getTimeout());
+        if (sentinelUri.getClientName() != null) {
+            builder.withClientName(sentinelUri.getClientName());
+        }
+        return builder.build();
     }
 
     private void subscribeOnConnection(final StatefulRedisPubSubConnection<String, String> connection,

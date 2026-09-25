@@ -11,7 +11,7 @@ import java.util.Arrays;
 import java.util.List;
 
 public final class SchemaManager {
-    public static final int CURRENT_SCHEMA_VERSION = 2;
+    public static final int CURRENT_SCHEMA_VERSION = 3;
 
     private SchemaManager() {
     }
