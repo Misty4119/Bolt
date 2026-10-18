@@ -4,20 +4,13 @@ plugins {
 
 repositories {
     mavenCentral()
-    maven("https://maven.canvasmc.io/releases")
     maven("https://repo.papermc.io/repository/maven-public/")
     maven("https://repo.codemc.io/repository/maven-public/")
     maven("https://s01.oss.sonatype.org/content/repositories/snapshots/")
 }
 
 dependencies {
-    compileOnly(group = "io.canvasmc.canvas", name = "canvas-api", version = "26.2.build.941-stable")
-    implementation("com.zaxxer:HikariCP:${project.property("hikariVersion")}")
-    implementation("com.google.code.gson:gson:${project.property("gsonVersion")}")
-    implementation("org.postgresql:postgresql:${project.property("postgresqlDriverVersion")}")
-    implementation("com.mysql:mysql-connector-j:${project.property("mysqlDriverVersion")}")
-    implementation("org.xerial:sqlite-jdbc:${project.property("sqliteDriverVersion")}")
-    implementation("io.lettuce:lettuce-core:${project.property("lettuceVersion")}")
+    compileOnly(group = "io.papermc.paper", name = "paper-api", version = "26.3.build.+")
     implementation(group = "net.kyori", name = "event-api", version = "3.0.0") {
         exclude(module = "guava")
         exclude(module = "checker-qual")
@@ -26,24 +19,15 @@ dependencies {
     implementation(group = "org.popcraft", name = "chunky-nbt", version = "1.3.127")
     api(project(":bolt-common"))
     implementation(project(":bolt-folia"))
-    testImplementation("net.kyori:adventure-text-minimessage:4.24.0")
-    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.10.2")
-}
-
-tasks {
-    test {
-        useJUnitPlatform()
-    }
 }
 
 tasks {
     processResources {
         inputs.property("version", project.version)
-        val name = project.property("artifactName").toString()
+        val name = project.property("artifactName")
         val version = project.version
         val group = project.group
-        val description = project.property("description").toString()
+        val description = project.property("description")
         filesMatching("plugin.yml") {
             expand(
                 "name" to name,
@@ -54,12 +38,13 @@ tasks {
         }
     }
     shadowJar {
+        minimize {
+            exclude(project(":bolt-common"))
+            exclude(project(":bolt-folia"))
+        }
         relocate("net.kyori.event", "${project.group}.${rootProject.name}.lib.net.kyori.event")
         relocate("org.bstats", "${project.group}.${rootProject.name}.lib.org.bstats")
         relocate("org.popcraft.chunky.nbt", "${project.group}.${rootProject.name}.lib.org.popcraft.chunky.nbt")
-        relocate("com.zaxxer.hikari", "${project.group}.${rootProject.name}.lib.com.zaxxer.hikari")
-        relocate("io.lettuce", "${project.group}.${rootProject.name}.lib.io.lettuce")
-        relocate("io.netty", "${project.group}.${rootProject.name}.lib.io.netty")
         manifest {
             attributes("paperweight-mappings-namespace" to "mojang")
         }

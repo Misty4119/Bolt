@@ -18,6 +18,7 @@ import org.bukkit.entity.ItemFrame;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
+import org.bukkit.event.Cancellable;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -61,6 +62,7 @@ import org.popcraft.bolt.BoltPlugin;
 import org.popcraft.bolt.access.Access;
 import org.popcraft.bolt.event.LockEntityEvent;
 import org.popcraft.bolt.lang.Translation;
+import org.popcraft.bolt.listeners.adapter.EntityBreakEventListener;
 import org.popcraft.bolt.protection.BlockProtection;
 import org.popcraft.bolt.protection.EntityProtection;
 import org.popcraft.bolt.protection.Protection;
@@ -271,8 +273,16 @@ public final class EntityListener extends InteractionListener implements Listene
 
     @EventHandler
     public void onHangingBreakByEntity(final HangingBreakByEntityEvent e) {
-        final Entity entity = e.getEntity();
-        if (getDamagerSource(e.getRemover()) instanceof final Player player) {
+        // On 26.3+, this event is fired alongside EntityBreakByEntityEvent, leading to double interactions. If that
+        // event is used, ignore this event.
+        if (EntityBreakEventListener.canUse()) {
+            return;
+        }
+        onEntityBreakByEntity(e.getEntity(), e.getRemover(), e);
+    }
+
+    public void onEntityBreakByEntity(final Entity entity, final Entity remover, Cancellable e) {
+        if (getDamagerSource(remover) instanceof final Player player) {
             if (handlePlayerEntityInteraction(player, entity, Permission.DESTROY, true)) {
                 e.setCancelled(true);
             } else {
@@ -292,6 +302,12 @@ public final class EntityListener extends InteractionListener implements Listene
                 }
             }
         } else if (plugin.isProtected(entity)) {
+            e.setCancelled(true);
+        }
+    }
+
+    public void onEntityBreak(final Entity entity, Cancellable e) {
+        if (plugin.isProtected(entity)) {
             e.setCancelled(true);
         }
     }

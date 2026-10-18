@@ -13,7 +13,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class MemoryStore implements Store, BulkBlockLookupStore {
+public class MemoryStore implements Store {
     private final Map<BlockLocation, BlockProtection> blockProtectionMap = new ConcurrentHashMap<>();
     private final Map<UUID, EntityProtection> entityProtectionMap = new ConcurrentHashMap<>();
     private final Map<String, Group> groupMap = new ConcurrentHashMap<>();
@@ -27,15 +27,6 @@ public class MemoryStore implements Store, BulkBlockLookupStore {
     @Override
     public CompletableFuture<Collection<BlockProtection>> loadBlockProtections() {
         return CompletableFuture.completedFuture(List.copyOf(blockProtectionMap.values()));
-    }
-
-    @Override
-    public CompletableFuture<Collection<BlockProtection>> loadBlockProtections(final Collection<BlockLocation> locations) {
-        final java.util.Set<BlockLocation> requested = java.util.Set.copyOf(locations);
-        return CompletableFuture.completedFuture(blockProtectionMap.entrySet().stream()
-                .filter(entry -> requested.contains(entry.getKey()))
-                .map(Map.Entry::getValue)
-                .toList());
     }
 
     @Override

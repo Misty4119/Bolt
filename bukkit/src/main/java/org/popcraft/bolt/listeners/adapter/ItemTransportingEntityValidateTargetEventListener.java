@@ -5,12 +5,10 @@ import org.bukkit.block.Block;
 import org.bukkit.entity.Entity;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
-import org.popcraft.bolt.BoltPlugin;
-import org.popcraft.bolt.data.SensitiveOperation;
 
 import java.util.function.Consumer;
 
-public record ItemTransportingEntityValidateTargetEventListener(BoltPlugin plugin, Handler handler) implements Listener {
+public record ItemTransportingEntityValidateTargetEventListener(Handler handler) implements Listener {
     public static boolean canUse() {
         try {
             Class.forName("io.papermc.paper.event.entity.ItemTransportingEntityValidateTargetEvent");
@@ -22,10 +20,6 @@ public record ItemTransportingEntityValidateTargetEventListener(BoltPlugin plugi
 
     @EventHandler
     public void onItemTransportingEntityValidateTarget(final ItemTransportingEntityValidateTargetEvent e) {
-        if (!plugin.allowsSensitiveOperation(SensitiveOperation.HOPPER)) {
-            e.setAllowed(false);
-            return;
-        }
         handler.accept(e.getEntity(), e.getBlock(), e::setAllowed);
     }
 

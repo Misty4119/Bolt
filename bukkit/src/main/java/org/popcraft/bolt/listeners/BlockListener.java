@@ -52,7 +52,6 @@ import org.bukkit.event.world.StructureGrowEvent;
 import org.bukkit.util.Vector;
 import org.popcraft.bolt.BoltPlugin;
 import org.popcraft.bolt.access.Access;
-import org.popcraft.bolt.data.SensitiveOperation;
 import org.popcraft.bolt.event.LockBlockEvent;
 import org.popcraft.bolt.lang.Translation;
 import org.popcraft.bolt.listeners.adapter.ConnectedShelves;
@@ -74,7 +73,6 @@ import org.popcraft.bolt.util.Protections;
 import org.popcraft.bolt.util.SchedulerUtil;
 
 import java.util.List;
-import java.util.HashSet;
 import java.util.Set;
 
 import static org.popcraft.bolt.util.BoltComponents.translateRaw;
@@ -103,15 +101,6 @@ public final class BlockListener extends InteractionListener implements Listener
         // First interaction in this tick, to avoid some double actions when both hands are sent as events.
         final boolean firstInteraction = !boltPlayer.hasInteracted();
         final Protection protection = plugin.findProtection(clicked);
-        if (plugin.getConfig().getBoolean("gui.enabled", true) && plugin.getConfig().getBoolean("gui.sneak-right-click-owner", true)
-                && firstInteraction && player.isSneaking() && org.bukkit.event.block.Action.RIGHT_CLICK_BLOCK.equals(e.getAction())
-                && protection instanceof BlockProtection && player.getUniqueId().equals(protection.getOwner())) {
-            e.setCancelled(true);
-            plugin.openProtectionMenu(player, protection);
-            boltPlayer.setInteracted();
-            SchedulerUtil.schedule(plugin, player, boltPlayer::clearInteraction);
-            return;
-        }
         boolean shouldCancel = false;
         boolean interacted = false;
         if (firstInteraction && triggerAction(player, protection, clicked)) {
@@ -473,30 +462,12 @@ public final class BlockListener extends InteractionListener implements Listener
 
     @EventHandler
     public void onBlockIgnite(final BlockIgniteEvent e) {
-        try {
-            final Protection protection = plugin.findProtection(e.getBlock());
-            if (protection != null) {
-                final Player player = e.getPlayer();
-                if (player == null || !plugin.canAccess(protection, player, Permission.INTERACT)) {
-                    e.setCancelled(true);
-                    return;
-                }
-            }
-            final BlockIgniteEvent.IgniteCause cause = e.getCause();
-            if (!BlockIgniteEvent.IgniteCause.FLINT_AND_STEEL.equals(cause)
-                    && !BlockIgniteEvent.IgniteCause.FIREBALL.equals(cause)) {
-                return;
-            }
-            if (!plugin.allowsSensitiveOperation(SensitiveOperation.PORTAL)) {
-                e.setCancelled(true);
-                return;
-            }
-            if (hasProtectedNetherPortalFrame(e.getBlock())) {
-                e.setCancelled(true);
-            }
-        } catch (RuntimeException exception) {
-            plugin.getLogger().log(java.util.logging.Level.WARNING,
-                    "Unable to verify protected portal ignition; cancelling conservatively", exception);
+        final Protection protection = plugin.findProtection(e.getBlock());
+        if (protection == null) {
+            return;
+        }
+        final Player player = e.getPlayer();
+        if (player == null || !plugin.canAccess(protection, player, Permission.INTERACT)) {
             e.setCancelled(true);
         }
     }
@@ -692,91 +663,12 @@ public final class BlockListener extends InteractionListener implements Listener
         }
     }
 
-    private boolean hasProtectedNetherPortalFrame(final Block ignitionBlock) {
-        // A legal Nether portal frame is at most 23 blocks wide/high. Keep
-        // this scan bounded so a malformed event cannot turn into an
-        // unbounded world search.
-        final int radius = 23;
-        final Set<Block> candidates = new HashSet<>();
-        for (int offsetX = -radius; offsetX <= radius; offsetX++) {
-            for (int offsetY = -radius; offsetY <= radius; offsetY++) {
-                final Block xPlane = ignitionBlock.getWorld().getBlockAt(
-                        ignitionBlock.getX() + offsetX,
-                        ignitionBlock.getY() + offsetY,
-                        ignitionBlock.getZ()
-                );
-                if (xPlane.getType() == Material.OBSIDIAN) {
-                    candidates.add(xPlane);
-                }
-                final Block zPlane = ignitionBlock.getWorld().getBlockAt(
-                        ignitionBlock.getX(),
-                        ignitionBlock.getY() + offsetY,
-                        ignitionBlock.getZ() + offsetX
-                );
-                if (zPlane.getType() == Material.OBSIDIAN) {
-                    candidates.add(zPlane);
-                }
-            }
-        }
-        return plugin.hasProtectedBlocks(candidates);
-    }
-
     @EventHandler
     public void onPortalCreate(final PortalCreateEvent e) {
-        if (!plugin.allowsSensitiveOperation(SensitiveOperation.PORTAL)) {
-            e.setCancelled(true);
-            return;
-        }
-        try {
-            final Set<Block> candidates = new HashSet<>();
-            e.getBlocks().forEach(blockState -> candidates.add(blockState.getBlock()));
-            candidates.addAll(findNetherPortalFrameCandidates(e.getBlocks()));
-            // PortalCreate candidates are exact frame/portal blocks. Use the
-            // bounded bulk seam so strict multi-server mode does not perform
-            // one SQL read for every candidate.
-            if (plugin.hasProtectedBlocks(candidates)) {
+        for (final BlockState newBlock : e.getBlocks()) {
+            if (plugin.isProtected(newBlock.getBlock())) {
                 e.setCancelled(true);
             }
-        } catch (RuntimeException exception) {
-            plugin.getLogger().log(java.util.logging.Level.WARNING,
-                    "Unable to verify protected portal creation; cancelling conservatively", exception);
-            e.setCancelled(true);
         }
-    }
-
-    private Set<Block> findNetherPortalFrameCandidates(final List<BlockState> portalBlocks) {
-        if (portalBlocks.stream().noneMatch(state -> Material.NETHER_PORTAL.equals(state.getType()))) {
-            return Set.of();
-        }
-        final Set<Block> candidates = new HashSet<>();
-        final int minX = portalBlocks.stream().mapToInt(state -> state.getBlock().getX()).min().orElseThrow();
-        final int maxX = portalBlocks.stream().mapToInt(state -> state.getBlock().getX()).max().orElseThrow();
-        final int minY = portalBlocks.stream().mapToInt(state -> state.getBlock().getY()).min().orElseThrow();
-        final int maxY = portalBlocks.stream().mapToInt(state -> state.getBlock().getY()).max().orElseThrow();
-        final Set<Integer> xValues = portalBlocks.stream().map(state -> state.getBlock().getX()).collect(java.util.stream.Collectors.toSet());
-        final Set<Integer> zValues = portalBlocks.stream().map(state -> state.getBlock().getZ()).collect(java.util.stream.Collectors.toSet());
-        if (zValues.size() == 1) {
-            final Block sample = portalBlocks.getFirst().getBlock();
-            for (int x = minX - 1; x <= maxX + 1; x++) {
-                for (int y = minY - 1; y <= maxY + 1; y++) {
-                    if (x == minX - 1 || x == maxX + 1 || y == minY - 1 || y == maxY + 1) {
-                        candidates.add(sample.getWorld().getBlockAt(x, y, sample.getZ()));
-                    }
-                }
-            }
-        } else if (xValues.size() == 1) {
-            final Block sample = portalBlocks.getFirst().getBlock();
-            for (int z = portalBlocks.stream().mapToInt(state -> state.getBlock().getZ()).min().orElseThrow() - 1;
-                 z <= portalBlocks.stream().mapToInt(state -> state.getBlock().getZ()).max().orElseThrow() + 1; z++) {
-                for (int y = minY - 1; y <= maxY + 1; y++) {
-                    if (z == zValues.stream().mapToInt(Integer::intValue).min().orElseThrow() - 1
-                            || z == zValues.stream().mapToInt(Integer::intValue).max().orElseThrow() + 1
-                            || y == minY - 1 || y == maxY + 1) {
-                        candidates.add(sample.getWorld().getBlockAt(sample.getX(), y, z));
-                    }
-                }
-            }
-        }
-        return candidates;
     }
 }

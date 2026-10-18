@@ -11,11 +11,6 @@ public final class EntityProtection extends Protection {
         this.entity = entity;
     }
 
-    public EntityProtection(UUID id, UUID owner, String type, long created, long accessed, long version, Map<String, String> access, String entity) {
-        super(id, owner, type, created, accessed, version, access);
-        this.entity = entity;
-    }
-
     public String getEntity() {
         return entity;
     }
@@ -32,7 +27,6 @@ public final class EntityProtection extends Protection {
                 ", type='" + type + '\'' +
                 ", created=" + created +
                 ", accessed=" + accessed +
-                ", version=" + getVersion() +
                 ", access=" + access +
                 ", entity='" + entity + '\'' +
                 '}';

@@ -3,48 +3,6 @@ language: en
 settings:
   use-action-bar: false
   per-player-locale: true
-messages:
-  palette: light
-  colors:
-    light:
-      # Sky blue -> soft lavender
-      surface: "#121520"
-      surface-alt: "#1E2030"
-      primary: "#9CC3FF"
-      info: "#6FA8FF"
-      accent: "#D9B3FF"
-      accent-soft: "#B89BE8"
-      muted: "#8C8FA3"
-      text: "#D6DAEA"
-      neon-primary: "#4A8CFF"
-      glow-primary: "#709FFF"
-      neon-accent: "#A078E6"
-      glow-accent: "#C58FFF"
-      night-text: "#E6EAFA"
-      quiet: "#8D93AB"
-    dark:
-      # Deep slate -> luminous lavender
-      surface: "#121520"
-      surface-alt: "#1E2030"
-      primary: "#4A8CFF"
-      info: "#709FFF"
-      accent: "#A078E6"
-      accent-soft: "#C58FFF"
-      muted: "#8D93AB"
-      text: "#E6EAFA"
-      neon-primary: "#4A8CFF"
-      glow-primary: "#709FFF"
-      neon-accent: "#A078E6"
-      glow-accent: "#C58FFF"
-      night-text: "#E6EAFA"
-      quiet: "#8D93AB"
-gui:
-  enabled: true
-  sneak-right-click-owner: true
-audit:
-  enabled: true
-  retention-days: 90
-  recent-per-block: 100
 database:
   type: sqlite
   hostname: ""
@@ -53,25 +11,6 @@ database:
   password: ""
   prefix: ""
   properties: [ ]
-redis:
-  enabled: false
-  required: false
-  # For a shared network use a Redis Sentinel URI, for example:
-  # redis-sentinel://sentinel-a:26379,sentinel-b:26379?sentinelMasterId=bolt-master
-  # Sentinel mode uses MasterReplica for cache reads/writes and reconnects
-  # invalidation Pub/Sub against the current elected master.
-  uri: redis://127.0.0.1:6379
-  namespace: "bolt:"
-  network-id: default
-  server-id: standalone
-  server-group: default
-outbox:
-  enabled: true
-  interval-ms: 1000
-  batch-size: 100
-  max-attempts: 8
-  lease-ms: 15000
-  retry-base-ms: 500
 protections:
   private:
     default: true
@@ -82,21 +21,21 @@ protections:
     allows: [ "redstone", "interact", "open" ]
   deposit:
     require-permission: false
-    allows: [ "redstone", "interact", "open", "deposit", "hopper_insert" ]
+    allows: [ "redstone", "interact", "open", "deposit" ]
   withdrawal:
     require-permission: false
-    allows: [ "redstone", "interact", "open", "withdraw", "hopper_extract" ]
+    allows: [ "redstone", "interact", "open", "withdraw" ]
   public:
     require-permission: false
-    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "hopper_insert", "hopper_extract", "mount" ]
+    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "mount" ]
 access:
   normal:
     default: true
     require-permission: false
-    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "hopper_insert", "hopper_extract", "mount" ]
+    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "mount" ]
   admin:
     require-permission: true
-    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "hopper_insert", "hopper_extract", "mount", "edit" ]
+    allows: [ "redstone", "interact", "open", "deposit", "withdraw", "mount", "edit" ]
 sources:
   player:
     require-permission: false
@@ -197,6 +136,8 @@ entities:
   oak_chest_boat:
     autoProtect: private
   pale_oak_chest_boat:
+    autoProtect: private
+  poplar_chest_boat:
     autoProtect: private
   spruce_chest_boat:
     autoProtect: private
