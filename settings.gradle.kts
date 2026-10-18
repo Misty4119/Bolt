@@ -13,7 +13,6 @@ rootProject.name = "bolt"
 sequenceOf(
     "common",
     "bukkit",
-    "paper",
     "folia"
 ).forEach {
     include("${rootProject.name}-$it")

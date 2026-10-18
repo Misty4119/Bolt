@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    compileOnly(group = "io.papermc.paper", name = "paper-api", version = "26.3.build.+")
+    compileOnly(group = "io.papermc.paper", name = "paper-api", version = "26.3.build.205-stable")
     implementation(group = "net.kyori", name = "event-api", version = "3.0.0") {
         exclude(module = "guava")
         exclude(module = "checker-qual")
@@ -24,10 +24,10 @@ dependencies {
 tasks {
     processResources {
         inputs.property("version", project.version)
-        val name = project.property("artifactName")
+        val name = project.property("artifactName") as String
         val version = project.version
         val group = project.group
-        val description = project.property("description")
+        val description = project.property("description") as String
         filesMatching("plugin.yml") {
             expand(
                 "name" to name,
@@ -76,7 +76,7 @@ modrinth {
         "1.21.1",
         "1.21.2",
         "1.21.3",
-        "1.21.4"
+        "1.21.4", "26.2", "26.3"
     )
     loaders.addAll("bukkit", "spigot", "paper", "folia")
 }

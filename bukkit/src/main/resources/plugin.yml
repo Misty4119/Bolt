@@ -1,8 +1,9 @@
 name: ${name}
 version: ${version}
 main: ${group}.bolt.BoltPlugin
-api-version: "1.20.6"
+api-version: "26.2"
 folia-supported: true
+canvas-supported: true
 authors: [ pop4959, rymiel ]
 description: ${description}
 commands:
