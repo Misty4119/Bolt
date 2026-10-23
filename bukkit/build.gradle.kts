@@ -59,24 +59,8 @@ modrinth {
     versionType.set("release")
     uploadFile.set(tasks.shadowJar)
     gameVersions.addAll(
-        "1.18.2",
-        "1.19",
-        "1.19.1",
-        "1.19.2",
-        "1.19.3",
-        "1.19.4",
-        "1.20",
-        "1.20.1",
-        "1.20.2",
-        "1.20.3",
-        "1.20.4",
-        "1.20.5",
-        "1.20.6",
-        "1.21",
-        "1.21.1",
-        "1.21.2",
-        "1.21.3",
-        "1.21.4", "26.2", "26.3"
+        "26.2",
+        "26.3"
     )
     loaders.addAll("bukkit", "spigot", "paper", "folia")
 }
